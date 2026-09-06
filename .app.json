@@ -1,0 +1,8 @@
+{
+  "apps": {
+    "myiis": {
+      "id": "asdk_app_myiis",
+      "required": true
+    }
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "name": "myiis-mcp",
+  "version": "1.0.0",
+  "description": "Расписание учебных групп и преподавателей БГУИР через официальный API ИИС.",
+  "author": {
+    "name": "Vladislav Vasilevskiy",
+    "email": "Vlad.vasilevskiy.07@gmail.com",
+    "url": "https://github.com/OrDinaD"
+  },
+  "homepage": "https://github.com/OrDinaD/myiis-mcp",
+  "repository": "https://github.com/OrDinaD/myiis-mcp",
+  "license": "MIT",
+  "keywords": ["bsuir", "schedule", "mcp", "chatgpt"],
+  "apps": "./.app.json",
+  "interface": {
+    "displayName": "MyIIS БГУИР",
+    "shortDescription": "Расписание занятий БГУИР",
+    "longDescription": "Интерактивный плагин для удобного просмотра расписания занятий студенческих групп и преподавателей БГУИР напрямую в чате ChatGPT.",
+    "developerName": "Vladislav Vasilevskiy",
+    "category": "Education & Research",
+    "capabilities": ["Read"],
+    "websiteURL": "https://github.com/OrDinaD/myiis-mcp",
+    "privacyPolicyURL": "https://github.com/OrDinaD/myiis-mcp/blob/main/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/OrDinaD/myiis-mcp/blob/main/TERMS.md",
+    "supportURL": "https://github.com/OrDinaD/myiis-mcp/issues",
+    "defaultPrompt": [
+      "Какое расписание у группы 420603 на сегодня?",
+      "Покажи расписание занятий на завтра",
+      "Какая сейчас учебная неделя в БГУИР?"
+    ],
+    "brandColor": "#0055A5",
+    "logo": "./assets/icon-256.png"
+  }
+}
