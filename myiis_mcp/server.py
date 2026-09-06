@@ -276,8 +276,32 @@ security_settings = TransportSecuritySettings(
     allowed_origins=["*"],
 )
 
-app = mcp.streamable_http_app(
+_raw_app = mcp.streamable_http_app(
     streamable_http_path="/mcp",
     transport_security=security_settings,
     stateless_http=True,
 )
+
+
+class PathRewriteMiddleware:
+    """Ensure paths like /api/mcp and /api/health are routed transparently on Vercel."""
+
+    def __init__(self, inner_app):
+        self.inner_app = inner_app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path in ("/api/mcp", "/api/mcp/"):
+                scope["path"] = "/mcp"
+                scope["raw_path"] = b"/mcp"
+            elif path in ("/api/health", "/api/health/"):
+                scope["path"] = "/health"
+                scope["raw_path"] = b"/health"
+            elif path in ("/api", "/api/"):
+                scope["path"] = "/"
+                scope["raw_path"] = b"/"
+        await self.inner_app(scope, receive, send)
+
+
+app = PathRewriteMiddleware(_raw_app)
