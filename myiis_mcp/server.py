@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import inspect
 import json
+import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, get_type_hints
 
 from starlette.applications import Starlette
@@ -16,6 +18,21 @@ from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
 
 from .widget import WIDGET_HTML
+
+# ---------------------------------------------------------------------------
+# In-memory server request logs (for debugging and monitoring)
+# ---------------------------------------------------------------------------
+
+_SERVER_LOGS: list[dict[str, Any]] = []
+
+
+def _record_log(entry: dict[str, Any]) -> None:
+    """Record an in-memory server log entry (keeps last 100 entries)."""
+    global _SERVER_LOGS
+    _SERVER_LOGS.append(entry)
+    if len(_SERVER_LOGS) > 100:
+        _SERVER_LOGS.pop(0)
+
 
 from .bsuir.client import BSUIRClient
 from .bsuir.exceptions import (
@@ -576,7 +593,26 @@ class MCPServer:
                 "Mcp-Session-Id": session_id,
             }
 
+            t0 = time.perf_counter()
+            client_ip = (
+                request.headers.get("cf-connecting-ip")
+                or request.headers.get("x-forwarded-for")
+                or (request.client.host if request.client else "unknown")
+            )
+            user_agent = request.headers.get("user-agent", "unknown")
+
             if request.method == "GET":
+                duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+                _record_log({
+                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    "method": "GET",
+                    "path": streamable_http_path,
+                    "status": 200,
+                    "duration_ms": duration_ms,
+                    "client_ip": client_ip,
+                    "user_agent": user_agent,
+                    "rpc_method": "endpoint_info",
+                })
                 if "text/event-stream" in accept_header:
                     stream_content = f"event: endpoint\ndata: {streamable_http_path}\n\n"
                     return Response(
@@ -599,6 +635,17 @@ class MCPServer:
                 try:
                     payload = await request.json()
                 except Exception:
+                    duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+                    _record_log({
+                        "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                        "method": "POST",
+                        "path": streamable_http_path,
+                        "status": 400,
+                        "duration_ms": duration_ms,
+                        "client_ip": client_ip,
+                        "user_agent": user_agent,
+                        "error": "JSON parse error",
+                    })
                     return JSONResponse(
                         {
                             "jsonrpc": "2.0",
@@ -618,11 +665,43 @@ class MCPServer:
                         resp = await self._handle_jsonrpc_request(single_req)
                         if resp is not None:
                             responses.append(resp)
+                    duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+                    _record_log({
+                        "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                        "method": "POST",
+                        "path": streamable_http_path,
+                        "status": 200 if responses else 202,
+                        "duration_ms": duration_ms,
+                        "client_ip": client_ip,
+                        "user_agent": user_agent,
+                        "rpc_batch_count": len(payload),
+                        "rpc_methods": [p.get("method") for p in payload if isinstance(p, dict)],
+                    })
                     if not responses:
                         return Response(status_code=202, headers=cors_headers)
                     resp_data = responses
                 elif isinstance(payload, dict):
                     resp = await self._handle_jsonrpc_request(payload)
+                    duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+                    log_item = {
+                        "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                        "method": "POST",
+                        "path": streamable_http_path,
+                        "status": 200 if resp is not None else 202,
+                        "duration_ms": duration_ms,
+                        "client_ip": client_ip,
+                        "user_agent": user_agent,
+                        "rpc_method": payload.get("method"),
+                        "rpc_id": payload.get("id"),
+                    }
+                    params = payload.get("params") or {}
+                    if isinstance(params, dict):
+                        if "name" in params:
+                            log_item["tool"] = params["name"]
+                            log_item["tool_args"] = params.get("arguments")
+                        if "uri" in params:
+                            log_item["resource_uri"] = params["uri"]
+                    _record_log(log_item)
                     if resp is None:
                         return Response(status_code=202, headers=cors_headers)
                     resp_data = resp
@@ -747,6 +826,7 @@ WIDGET_CSP_LEGACY = {
 
 WIDGET_RESOURCE_META = {
     "ui": {
+        "domain": "https://myiis-mcp.vlad-vasilevskiy-07.workers.dev",
         "prefersBorder": True,
         "csp": WIDGET_CSP,
     },
@@ -1104,6 +1184,100 @@ async def widget_html_alias(request: Request) -> HTMLResponse:
     return HTMLResponse(WIDGET_HTML)
 
 
+@mcp.custom_route("/logs", methods=["GET"])
+async def server_logs(request: Request) -> Response:
+    """Inspect recent server request logs in JSON or HTML."""
+    accept = request.headers.get("accept", "")
+    format_query = request.query_params.get("format", "")
+
+    if "application/json" in accept or format_query == "json":
+        return JSONResponse(
+            {
+                "status": "ok",
+                "server": "MyIIS MCP Server",
+                "total_logged": len(_SERVER_LOGS),
+                "logs": list(reversed(_SERVER_LOGS)),
+            }
+        )
+
+    rows = []
+    for entry in reversed(_SERVER_LOGS):
+        time_str = entry.get("time", "")
+        method = entry.get("method", "")
+        path = entry.get("path", "")
+        rpc = entry.get("rpc_method") or "—"
+        tool = entry.get("tool") or ""
+        tool_args = json.dumps(entry.get("tool_args", {}), ensure_ascii=False) if entry.get("tool_args") else ""
+        resource = entry.get("resource_uri") or ""
+        detail = ""
+        if tool:
+            detail = f"<strong>Tool:</strong> <code>{tool}</code> <span style='color:#94a3b8;'>{tool_args}</span>"
+        elif resource:
+            detail = f"<strong>Resource:</strong> <code>{resource}</code>"
+        elif entry.get("rpc_methods"):
+            detail = f"Batch: {', '.join(str(m) for m in entry['rpc_methods'])}"
+        dur = f"{entry.get('duration_ms', 0)} ms"
+        ip = entry.get("client_ip", "—")
+        ua = entry.get("user_agent", "—")
+
+        rows.append(
+            f"<tr><td>{time_str}</td><td><span class='badge'>{method} {path}</span></td>"
+            f"<td><code>{rpc}</code></td><td>{detail}</td><td>{dur}</td><td>{ip}</td>"
+            f"<td style='max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;' title='{ua}'>{ua}</td></tr>"
+        )
+
+    table_rows = "".join(rows) if rows else "<tr><td colspan='7' style='text-align:center;padding:24px;color:#94a3b8;'>Логов пока нет. Сделайте запрос в ChatGPT или через curl.</td></tr>"
+
+    html = f"""<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MyIIS MCP Server • Logs</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 24px; }}
+    h1 {{ font-size: 20px; margin-bottom: 8px; display: flex; align-items: center; gap: 10px; }}
+    p {{ color: #94a3b8; font-size: 14px; margin-bottom: 20px; }}
+    .actions {{ margin-bottom: 16px; display: flex; gap: 10px; }}
+    .btn {{ background: #0284c7; color: white; padding: 6px 14px; border-radius: 6px; text-decoration: none; font-size: 13px; font-weight: 500; }}
+    .btn:hover {{ background: #0369a1; }}
+    table {{ width: 100%; border-collapse: collapse; background: #1e293b; border-radius: 8px; overflow: hidden; font-size: 13px; }}
+    th, td {{ padding: 10px 14px; text-align: left; border-bottom: 1px solid #334155; }}
+    th {{ background: #1e293b; color: #94a3b8; font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }}
+    tr:hover {{ background: #273549; }}
+    code {{ background: #0f172a; padding: 2px 6px; border-radius: 4px; font-family: monospace; font-size: 12px; color: #38bdf8; }}
+    .badge {{ background: #334155; padding: 2px 8px; border-radius: 4px; font-weight: 600; font-size: 11px; }}
+  </style>
+</head>
+<body>
+  <h1>📡 MyIIS MCP Server • Realtime Logs</h1>
+  <p>Последние 100 запросов к серверу (актуально для проверки вызовов из ChatGPT, Claude и MCP клиентов).</p>
+  <div class="actions">
+    <a href="/logs" class="btn">🔄 Обновить</a>
+    <a href="/logs?format=json" class="btn" style="background:#475569;">JSON формат</a>
+    <a href="/widget?demo=schedule" class="btn" style="background:#059669;" target="_blank">Открыть виджет</a>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>Время (UTC)</th>
+        <th>Запрос</th>
+        <th>RPC Метод</th>
+        <th>Параметры / Детали</th>
+        <th>Время</th>
+        <th>IP</th>
+        <th>User-Agent</th>
+      </tr>
+    </thead>
+    <tbody>
+      {table_rows}
+    </tbody>
+  </table>
+</body>
+</html>"""
+    return HTMLResponse(html)
+
+
 @mcp.custom_route("/", methods=["GET"])
 async def root_info(request: Request) -> JSONResponse:
     """Server discovery and information endpoint."""
@@ -1117,6 +1291,7 @@ async def root_info(request: Request) -> JSONResponse:
                 "mcp": "/mcp",
                 "health": "/health",
                 "widget": "/widget",
+                "logs": "/logs",
             },
             "status": "running",
         }

@@ -143,3 +143,44 @@ def test_mcp_resources_read(client):
     assert "ui://bsuir/widget.html" in text
     assert "БГУИР • ИИС Виджет" in text
 
+
+def test_widget_safety(client):
+    response = client.get("/widget")
+    assert response.status_code == 200
+    # Must NOT contain raw postMessage ui/resize which crashes ChatGPT
+    assert "ui/resize" not in response.text
+    # Must contain openai:set_globals listener
+    assert "openai:set_globals" in response.text
+    # Must contain window.onerror safety handler
+    assert "window.onerror" in response.text
+
+
+def test_server_logs_endpoint(client):
+    # Make a tool call first to ensure it's logged
+    call_payload = {
+        "jsonrpc": "2.0",
+        "id": 99,
+        "method": "tools/call",
+        "params": {"name": "get_current_week", "arguments": {}},
+    }
+    client.post(
+        "/mcp",
+        json=call_payload,
+        headers={"accept": "application/json"},
+    )
+
+    # Fetch logs in HTML
+    html_resp = client.get("/logs")
+    assert html_resp.status_code == 200
+    assert "MyIIS MCP Server • Realtime Logs" in html_resp.text
+    assert "get_current_week" in html_resp.text
+
+    # Fetch logs in JSON
+    json_resp = client.get("/logs?format=json")
+    assert json_resp.status_code == 200
+    data = json_resp.json()
+    assert data["status"] == "ok"
+    assert data["total_logged"] >= 1
+    assert any(log.get("tool") == "get_current_week" for log in data["logs"])
+
+

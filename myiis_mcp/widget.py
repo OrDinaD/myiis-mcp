@@ -507,6 +507,29 @@ WIDGET_HTML = """<!DOCTYPE html>
       color: white;
     }
 
+    /* Day Divider */
+    .day-divider {
+      display: flex;
+      align-items: center;
+      margin: 16px 0 8px;
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.3px;
+    }
+
+    .day-divider::before,
+    .day-divider::after {
+      content: "";
+      flex: 1;
+      height: 1px;
+      background: var(--border);
+    }
+
+    .day-divider span {
+      padding: 0 10px;
+    }
+
     /* Empty state */
     .empty-state {
       padding: 24px 16px;
@@ -562,30 +585,45 @@ WIDGET_HTML = """<!DOCTYPE html>
 
   <script>
     (function () {
+      // 0. Global error safety: prevent any script error from bubbling to ChatGPT host
+      window.onerror = function (msg, url, lineNo, columnNo, error) {
+        console.warn("MyIIS widget error caught:", msg, error);
+        return true;
+      };
+
       // 1. Theme Management (OpenAI Bridge + System preferences)
       function applyTheme(theme) {
-        if (theme === 'dark' || theme === 'light') {
-          document.documentElement.setAttribute('data-theme', theme);
-        } else if (window.openai && window.openai.theme) {
-          document.documentElement.setAttribute('data-theme', window.openai.theme);
-        }
+        try {
+          if (theme === 'dark' || theme === 'light') {
+            document.documentElement.setAttribute('data-theme', theme);
+          } else if (window.openai && window.openai.theme) {
+            document.documentElement.setAttribute('data-theme', window.openai.theme);
+          }
+        } catch (e) {}
       }
 
       applyTheme();
 
       if (window.matchMedia) {
-        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
-          if (!document.documentElement.getAttribute('data-theme')) applyTheme();
-        });
+        try {
+          window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
+            if (!document.documentElement.getAttribute('data-theme')) applyTheme();
+          });
+        } catch (e) {}
       }
 
       // 2. Notify height to ChatGPT iframe container
+      // NOTE: We use window.openai.notifyIntrinsicHeight exclusively!
+      // NEVER send unformatted postMessage events as they crash ChatGPT's host message router!
       function reportHeight() {
-        var height = document.documentElement.scrollHeight || document.body.scrollHeight;
-        if (window.openai && typeof window.openai.notifyIntrinsicHeight === 'function') {
-          try { window.openai.notifyIntrinsicHeight(height); } catch (e) {}
+        try {
+          var height = document.documentElement.scrollHeight || document.body.scrollHeight;
+          if (window.openai && typeof window.openai.notifyIntrinsicHeight === 'function') {
+            window.openai.notifyIntrinsicHeight(height);
+          }
+        } catch (e) {
+          console.warn("Error notifying height:", e);
         }
-        window.parent.postMessage({ type: 'ui/resize', height: height }, '*');
       }
 
       window.addEventListener('load', reportHeight);
@@ -593,166 +631,193 @@ WIDGET_HTML = """<!DOCTYPE html>
 
       // 3. Renderers
       function renderSchedule(data) {
-        document.getElementById('headerSub').textContent = ' • Расписание';
-        if (data.current_week) {
-          document.getElementById('weekBadgeText').textContent = data.current_week + '-я неделя';
-        }
+        try {
+          var headerSub = document.getElementById('headerSub');
+          if (headerSub) headerSub.textContent = ' • Расписание';
 
-        var days = data.days || [];
-        var hasLessons = false;
-        for (var i = 0; i < days.length; i++) {
-          if (days[i].lessons && days[i].lessons.length > 0) {
-            hasLessons = true;
-            break;
+          var weekBadgeText = document.getElementById('weekBadgeText');
+          if (weekBadgeText) {
+            weekBadgeText.textContent = data.current_week ? (data.current_week + '-я неделя') : 'Семестр';
           }
-        }
 
-        var html = '<div class="schedule-header">' +
-          '<div class="schedule-target">' + escapeHtml(data.target || 'Расписание') + '</div>' +
-          '<div class="schedule-date-chip">' + escapeHtml(data.query_date || 'Ближайшие дни') + '</div>' +
-          '</div>';
-
-        if (!hasLessons) {
-          html += '<div class="empty-state">' +
-            '<div class="empty-icon">🎉</div>' +
-            '<div class="empty-text">Занятий нет</div>' +
-            '<div class="empty-sub">В выбранный день пар не найдено</div>' +
-            '</div>';
-        } else {
-          html += '<div class="lesson-list">';
-          for (var d = 0; d < days.length; d++) {
-            var lessons = days[d].lessons || [];
-            for (var l = 0; l < lessons.length; l++) {
-              var lesson = lessons[l];
-              var typeClass = getBadgeClass(lesson.lesson_type);
-              var aud = (lesson.auditories && lesson.auditories.length)
-                ? lesson.auditories.join(', ')
-                : (lesson.building ? 'корп. ' + lesson.building : '—');
-              var subgroup = lesson.subgroup ? '<span class="meta-chip">' + lesson.subgroup + '-я подгруппа</span>' : '';
-              var teachers = (lesson.teachers && lesson.teachers.length)
-                ? '<span class="meta-chip">👤 ' + escapeHtml(lesson.teachers.join(', ')) + '</span>'
-                : '';
-              var groups = (lesson.groups && lesson.groups.length)
-                ? '<span class="meta-chip">👥 ' + escapeHtml(lesson.groups.join(', ')) + '</span>'
-                : '';
-
-              html += '<div class="lesson-card">' +
-                '<div class="lesson-time-col">' +
-                '<div class="lesson-time">' + escapeHtml(lesson.start_time || '') + ' – ' + escapeHtml(lesson.end_time || '') + '</div>' +
-                '<div class="lesson-type-badge ' + typeClass + '">' + escapeHtml(lesson.lesson_type || 'Занятие') + '</div>' +
-                '</div>' +
-                '<div class="lesson-main-col">' +
-                '<div class="lesson-subject">' + escapeHtml(lesson.subject_full_name || lesson.subject || 'Предмет') + '</div>' +
-                '<div class="lesson-meta-row">' +
-                '<span class="meta-chip meta-chip-auditory">📍 ' + escapeHtml(aud) + '</span>' +
-                subgroup + teachers + groups +
-                '</div>' +
-                '</div>' +
-                '</div>';
+          var days = Array.isArray(data.days) ? data.days : [];
+          var totalLessons = 0;
+          for (var i = 0; i < days.length; i++) {
+            if (days[i].lessons && days[i].lessons.length > 0) {
+              totalLessons += days[i].lessons.length;
             }
           }
-          html += '</div>';
-        }
 
-        if (data.teacher_contacts && data.teacher_contacts.length > 0) {
-          var c = data.teacher_contacts[0];
-          html += '<div style="margin-top: 14px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--text-muted); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px;">' +
-            '<span>🏢 <strong>' + escapeHtml(c.department || 'Кафедра') + ':</strong> ауд. ' + escapeHtml(c.auditory || '—') + ' (' + escapeHtml(c.building || '') + ')</span>' +
-            (c.phone ? '<a href="tel:' + escapeHtml(c.phone) + '" style="color: var(--primary); text-decoration: none; font-weight: 500;">📞 ' + escapeHtml(c.phone) + '</a>' : '') +
+          var targetName = data.target || 'Расписание';
+          var dateChip = data.query_date ? ('Период: ' + data.query_date) : (totalLessons > 0 ? (totalLessons + ' занятий') : 'Текущая неделя');
+
+          var html = '<div class="schedule-header">' +
+            '<div class="schedule-target">' + escapeHtml(targetName) + '</div>' +
+            '<div class="schedule-date-chip">' + escapeHtml(dateChip) + '</div>' +
             '</div>';
-        }
 
-        document.getElementById('contentArea').innerHTML = html;
-        reportHeight();
+          if (totalLessons === 0) {
+            html += '<div class="empty-state">' +
+              '<div class="empty-icon">🎉</div>' +
+              '<div class="empty-text">Занятий нет</div>' +
+              '<div class="empty-sub">' + escapeHtml(data.summary || 'В выбранный период пар не найдено') + '</div>' +
+              '</div>';
+          } else {
+            html += '<div class="lesson-list">';
+            for (var d = 0; d < days.length; d++) {
+              var day = days[d];
+              var lessons = day.lessons || [];
+              if (lessons.length === 0) continue;
+
+              if (days.length > 1) {
+                var dayLabel = day.day_of_week || '';
+                if (day.date) dayLabel += ' (' + day.date + ')';
+                html += '<div class="day-divider"><span>' + escapeHtml(dayLabel) + '</span></div>';
+              }
+
+              for (var l = 0; l < lessons.length; l++) {
+                var lesson = lessons[l];
+                var typeClass = getBadgeClass(lesson.lesson_type);
+                var aud = (lesson.auditories && lesson.auditories.length)
+                  ? lesson.auditories.join(', ')
+                  : (lesson.building ? 'корп. ' + lesson.building : '—');
+                var subgroup = lesson.subgroup ? '<span class="meta-chip">' + lesson.subgroup + '-я подгруппа</span>' : '';
+                var teachers = (lesson.teachers && lesson.teachers.length)
+                  ? '<span class="meta-chip">👤 ' + escapeHtml(lesson.teachers.join(', ')) + '</span>'
+                  : '';
+                var groups = (lesson.groups && lesson.groups.length)
+                  ? '<span class="meta-chip">👥 ' + escapeHtml(lesson.groups.join(', ')) + '</span>'
+                  : '';
+                var note = lesson.note ? '<span class="meta-chip">📝 ' + escapeHtml(lesson.note) + '</span>' : '';
+
+                html += '<div class="lesson-card">' +
+                  '<div class="lesson-time-col">' +
+                  '<div class="lesson-time">' + escapeHtml(lesson.start_time || '') + (lesson.end_time ? ' – ' + escapeHtml(lesson.end_time) : '') + '</div>' +
+                  '<div class="lesson-type-badge ' + typeClass + '">' + escapeHtml(lesson.lesson_type || 'Занятие') + '</div>' +
+                  '</div>' +
+                  '<div class="lesson-main-col">' +
+                  '<div class="lesson-subject">' + escapeHtml(lesson.subject_full_name || lesson.subject || 'Предмет') + '</div>' +
+                  '<div class="lesson-meta-row">' +
+                  '<span class="meta-chip meta-chip-auditory">📍 ' + escapeHtml(aud) + '</span>' +
+                  subgroup + teachers + groups + note +
+                  '</div>' +
+                  '</div>' +
+                  '</div>';
+              }
+            }
+            html += '</div>';
+          }
+
+          if (data.teacher_contacts && data.teacher_contacts.length > 0) {
+            var c = data.teacher_contacts[0];
+            html += '<div style="margin-top: 14px; padding: 10px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--text-muted); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px;">' +
+              '<span>🏢 <strong>' + escapeHtml(c.department || 'Кафедра') + ':</strong> ауд. ' + escapeHtml(c.auditory || '—') + (c.building ? ' (' + escapeHtml(c.building) + ')' : '') + '</span>' +
+              (c.phone ? '<a href="tel:' + escapeHtml(c.phone) + '" style="color: var(--primary); text-decoration: none; font-weight: 500;">📞 ' + escapeHtml(c.phone) + '</a>' : '') +
+              '</div>';
+          }
+
+          var contentArea = document.getElementById('contentArea');
+          if (contentArea) contentArea.innerHTML = html;
+          reportHeight();
+        } catch (err) {
+          console.error("renderSchedule error:", err);
+        }
       }
 
       function renderTeacherProfile(data) {
-        document.getElementById('headerSub').textContent = ' • Преподаватель';
-        document.getElementById('weekBadgeText').textContent = data.rank || 'Преподаватель';
+        try {
+          var headerSub = document.getElementById('headerSub');
+          if (headerSub) headerSub.textContent = ' • Преподаватель';
+          var weekBadgeText = document.getElementById('weekBadgeText');
+          if (weekBadgeText) weekBadgeText.textContent = data.rank || 'Преподаватель';
 
-        var initials = (data.first_name ? data.first_name[0] : '') + (data.last_name ? data.last_name[0] : '');
-        var avatarHtml = data.photo_url
-          ? '<img class="profile-avatar" src="' + escapeHtml(data.photo_url) + '" alt="' + escapeHtml(data.fio) + '" onerror="this.outerHTML=\\'<div class=\\\\\\'avatar-fallback\\\\\\'>' + escapeHtml(initials || 'П') + '</div>\\'" />'
-          : '<div class="avatar-fallback">' + escapeHtml(initials || 'П') + '</div>';
+          var initials = (data.first_name ? data.first_name[0] : '') + (data.last_name ? data.last_name[0] : '');
+          var avatarHtml = data.photo_url
+            ? '<img class="profile-avatar" src="' + escapeHtml(data.photo_url) + '" alt="' + escapeHtml(data.fio || '') + '" onerror="this.outerHTML=\'<div class=\\\'avatar-fallback\\\'>' + escapeHtml(initials || 'П') + '</div>\'" />'
+            : '<div class="avatar-fallback">' + escapeHtml(initials || 'П') + '</div>';
 
-        var contactsHtml = '';
-        if (data.email) {
-          contactsHtml += '<a class="contact-card" href="mailto:' + escapeHtml(data.email) + '">' +
-            '<span class="contact-icon">✉️</span>' +
-            '<div class="contact-info">' +
-            '<span class="contact-label">Почта</span>' +
-            '<span class="contact-value">' + escapeHtml(data.email) + '</span>' +
-            '</div>' +
-            '</a>';
-        }
+          var contactsHtml = '';
+          if (data.email) {
+            contactsHtml += '<a class="contact-card" href="mailto:' + escapeHtml(data.email) + '">' +
+              '<span class="contact-icon">✉️</span>' +
+              '<div class="contact-info">' +
+              '<span class="contact-label">Почта</span>' +
+              '<span class="contact-value">' + escapeHtml(data.email) + '</span>' +
+              '</div>' +
+              '</a>';
+          }
 
-        if (data.contacts && data.contacts.length > 0) {
-          for (var i = 0; i < data.contacts.length; i++) {
-            var c = data.contacts[i];
-            if (c.phone) {
-              contactsHtml += '<a class="contact-card" href="tel:' + escapeHtml(c.phone) + '">' +
-                '<span class="contact-icon">📞</span>' +
-                '<div class="contact-info">' +
-                '<span class="contact-label">Телефон</span>' +
-                '<span class="contact-value">' + escapeHtml(c.phone) + '</span>' +
-                '</div>' +
-                '</a>';
-            }
-            if (c.auditory) {
-              contactsHtml += '<div class="contact-card">' +
-                '<span class="contact-icon">🏢</span>' +
-                '<div class="contact-info">' +
-                '<span class="contact-label">Кабинет</span>' +
-                '<span class="contact-value">ауд. ' + escapeHtml(c.auditory) + ' (' + escapeHtml(c.building || '') + ')</span>' +
-                '</div>' +
-                '</div>';
-            }
-            if (c.department) {
-              contactsHtml += '<div class="contact-card">' +
-                '<span class="contact-icon">🏛️</span>' +
-                '<div class="contact-info">' +
-                '<span class="contact-label">Кафедра</span>' +
-                '<span class="contact-value">' + escapeHtml(c.department) + '</span>' +
-                '</div>' +
-                '</div>';
+          if (data.contacts && data.contacts.length > 0) {
+            for (var i = 0; i < data.contacts.length; i++) {
+              var c = data.contacts[i];
+              if (c.phone) {
+                contactsHtml += '<a class="contact-card" href="tel:' + escapeHtml(c.phone) + '">' +
+                  '<span class="contact-icon">📞</span>' +
+                  '<div class="contact-info">' +
+                  '<span class="contact-label">Телефон</span>' +
+                  '<span class="contact-value">' + escapeHtml(c.phone) + '</span>' +
+                  '</div>' +
+                  '</a>';
+              }
+              if (c.auditory) {
+                contactsHtml += '<div class="contact-card">' +
+                  '<span class="contact-icon">🏢</span>' +
+                  '<div class="contact-info">' +
+                  '<span class="contact-label">Кабинет</span>' +
+                  '<span class="contact-value">ауд. ' + escapeHtml(c.auditory) + (c.building ? ' (' + escapeHtml(c.building) + ')' : '') + '</span>' +
+                  '</div>' +
+                  '</div>';
+              }
+              if (c.department) {
+                contactsHtml += '<div class="contact-card">' +
+                  '<span class="contact-icon">🏛️</span>' +
+                  '<div class="contact-info">' +
+                  '<span class="contact-label">Кафедра</span>' +
+                  '<span class="contact-value">' + escapeHtml(c.department) + '</span>' +
+                  '</div>' +
+                  '</div>';
+              }
             }
           }
-        }
 
-        var coursesHtml = '';
-        if (data.reading_courses && data.reading_courses.length > 0) {
-          var tags = '';
-          for (var j = 0; j < data.reading_courses.length; j++) {
-            tags += '<span class="course-tag">' + escapeHtml(data.reading_courses[j]) + '</span>';
+          var coursesHtml = '';
+          if (data.reading_courses && data.reading_courses.length > 0) {
+            var tags = '';
+            for (var j = 0; j < data.reading_courses.length; j++) {
+              tags += '<span class="course-tag">' + escapeHtml(data.reading_courses[j]) + '</span>';
+            }
+            coursesHtml = '<div class="courses-section">' +
+              '<span class="section-title">Читаемые курсы и дисциплины</span>' +
+              '<div class="courses-tags">' + tags + '</div>' +
+              '</div>';
           }
-          coursesHtml = '<div class="courses-section">' +
-            '<span class="section-title">Читаемые курсы и дисциплины</span>' +
-            '<div class="courses-tags">' + tags + '</div>' +
+
+          var actionsHtml = '<div class="profile-actions">' +
+            (data.schedule_url ? '<a class="btn-action btn-primary" href="' + escapeHtml(data.schedule_url) + '" target="_blank" rel="noopener">📅 Расписание в ИИС</a>' : '') +
+            (data.repository_url ? '<a class="btn-action" href="' + escapeHtml(data.repository_url) + '" target="_blank" rel="noopener">📚 Труды в Репозитории</a>' : '') +
+            (data.profile_url ? '<a class="btn-action" href="' + escapeHtml(data.profile_url) + '" target="_blank" rel="noopener">🌐 Страница сотрудника</a>' : '') +
             '</div>';
+
+          var rankDegree = [data.degree, data.rank].filter(Boolean).join(' • ') || 'Сотрудник БГУИР';
+          var html = '<div class="profile-card">' +
+            '<div class="profile-header">' +
+            '<div class="profile-avatar-wrap">' + avatarHtml + '</div>' +
+            '<div class="profile-names">' +
+            '<div class="profile-fio">' + escapeHtml(data.fio || '') + '</div>' +
+            '<div class="profile-rank">' + escapeHtml(rankDegree) + '</div>' +
+            '</div>' +
+            '</div>' +
+            (contactsHtml ? '<div class="contact-grid">' + contactsHtml + '</div>' : '') +
+            coursesHtml +
+            actionsHtml +
+            '</div>';
+
+          var contentArea = document.getElementById('contentArea');
+          if (contentArea) contentArea.innerHTML = html;
+          reportHeight();
+        } catch (err) {
+          console.error("renderTeacherProfile error:", err);
         }
-
-        var actionsHtml = '<div class="profile-actions">' +
-          (data.schedule_url ? '<a class="btn-action btn-primary" href="' + escapeHtml(data.schedule_url) + '" target="_blank" rel="noopener">📅 Расписание в ИИС</a>' : '') +
-          (data.repository_url ? '<a class="btn-action" href="' + escapeHtml(data.repository_url) + '" target="_blank" rel="noopener">📚 Труды в Репозитории</a>' : '') +
-          (data.profile_url ? '<a class="btn-action" href="' + escapeHtml(data.profile_url) + '" target="_blank" rel="noopener">🌐 Страница сотрудника</a>' : '') +
-          '</div>';
-
-        var rankDegree = [data.degree, data.rank].filter(Boolean).join(' • ') || 'Сотрудник БГУИР';
-        var html = '<div class="profile-card">' +
-          '<div class="profile-header">' +
-          '<div class="profile-avatar-wrap">' + avatarHtml + '</div>' +
-          '<div class="profile-names">' +
-          '<div class="profile-fio">' + escapeHtml(data.fio || '') + '</div>' +
-          '<div class="profile-rank">' + escapeHtml(rankDegree) + '</div>' +
-          '</div>' +
-          '</div>' +
-          (contactsHtml ? '<div class="contact-grid">' + contactsHtml + '</div>' : '') +
-          coursesHtml +
-          actionsHtml +
-          '</div>';
-
-        document.getElementById('contentArea').innerHTML = html;
-        reportHeight();
       }
 
       function getBadgeClass(type) {
@@ -781,22 +846,47 @@ WIDGET_HTML = """<!DOCTYPE html>
         if (typeof raw === 'string') {
           try { data = JSON.parse(raw); } catch (e) { return; }
         }
+        if (data && data.structuredContent) {
+          data = data.structuredContent;
+        } else if (data && data.toolOutput) {
+          data = data.toolOutput;
+        }
 
-        if (data.target_type || data.days || data.total_lessons !== undefined) {
+        if (data && (data.target_type || data.days || data.total_lessons !== undefined || data.target)) {
           renderSchedule(data);
-        } else if (data.fio || data.reading_courses || data.email || data.photo_url) {
+        } else if (data && (data.fio || data.reading_courses || data.email || data.photo_url)) {
           renderTeacherProfile(data);
         }
       }
 
-      // Check window.openai immediately
-      if (window.openai) {
-        if (window.openai.toolOutput) {
-          handleData(window.openai.toolOutput);
-        } else if (window.openai.toolResponseMetadata && window.openai.toolResponseMetadata.structuredContent) {
-          handleData(window.openai.toolResponseMetadata.structuredContent);
+      // Check window.openai immediately if present
+      try {
+        if (window.openai) {
+          if (window.openai.theme) applyTheme(window.openai.theme);
+          if (window.openai.toolOutput) {
+            handleData(window.openai.toolOutput);
+          } else if (window.openai.toolResponseMetadata && window.openai.toolResponseMetadata.structuredContent) {
+            handleData(window.openai.toolResponseMetadata.structuredContent);
+          }
         }
-      }
+      } catch (e) {}
+
+      // Listen for openai:set_globals (ChatGPT Apps SDK async initialization)
+      window.addEventListener('openai:set_globals', function (event) {
+        try {
+          var g = (event && event.detail && event.detail.globals) || (event && event.detail) || window.openai;
+          if (g) {
+            if (g.theme) applyTheme(g.theme);
+            if (g.toolOutput) {
+              handleData(g.toolOutput);
+            } else if (g.toolResponseMetadata && g.toolResponseMetadata.structuredContent) {
+              handleData(g.toolResponseMetadata.structuredContent);
+            }
+          }
+        } catch (e) {
+          console.warn("openai:set_globals error:", e);
+        }
+      });
 
       // URL search params fallback / preview
       var params = new URLSearchParams(window.location.search);
@@ -855,18 +945,22 @@ WIDGET_HTML = """<!DOCTYPE html>
         });
       }
 
-      // Listen for postMessage from ChatGPT or host
+      // Listen for postMessage from MCP host
       window.addEventListener('message', function (event) {
-        if (!event.data) return;
-        var msg = event.data;
+        try {
+          if (!event.data || typeof event.data !== 'object') return;
+          var msg = event.data;
 
-        if (msg.method === 'ui/notifications/tool-result' && msg.params) {
-          handleData(msg.params.structuredContent || msg.params.content || msg.params);
-        } else if (msg.method === 'ui/initialize' && msg.params) {
-          if (msg.params.theme) applyTheme(msg.params.theme);
-          if (msg.params.toolOutput) handleData(msg.params.toolOutput);
-        } else if (msg.method === 'ui/notifications/host-context-changed' && msg.params) {
-          if (msg.params.theme) applyTheme(msg.params.theme);
+          if (msg.method === 'ui/notifications/tool-result' && msg.params) {
+            handleData(msg.params.structuredContent || msg.params.content || msg.params);
+          } else if (msg.method === 'ui/initialize' && msg.params) {
+            if (msg.params.theme) applyTheme(msg.params.theme);
+            if (msg.params.toolOutput) handleData(msg.params.toolOutput);
+          } else if (msg.method === 'ui/notifications/host-context-changed' && msg.params) {
+            if (msg.params.theme) applyTheme(msg.params.theme);
+          }
+        } catch (e) {
+          console.warn("Message listener error:", e);
         }
       });
     })();
