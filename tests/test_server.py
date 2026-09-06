@@ -94,3 +94,52 @@ async def test_tool_direct_call():
     assert profile_tool.annotations is not None
     assert profile_tool.annotations.read_only_hint is True
 
+
+def test_widget_endpoint(client):
+    response = client.get("/widget")
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "БГУИР • ИИС" in response.text
+    assert "window.openai" in response.text
+
+    # Check alias
+    alias_resp = client.get("/widget.html")
+    assert alias_resp.status_code == 200
+
+
+def test_mcp_resources_list(client):
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "resources/list",
+        "params": {},
+    }
+    response = client.post(
+        "/mcp",
+        json=payload,
+        headers={"accept": "application/json, text/event-stream"},
+    )
+    assert response.status_code == 200
+    text = response.text
+    assert "ui://bsuir/widget.html" in text
+    assert "text/html;profile=mcp-app" in text
+    assert "connectDomains" in text or "connect_domains" in text
+
+
+def test_mcp_resources_read(client):
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "resources/read",
+        "params": {"uri": "ui://bsuir/widget.html"},
+    }
+    response = client.post(
+        "/mcp",
+        json=payload,
+        headers={"accept": "application/json, text/event-stream"},
+    )
+    assert response.status_code == 200
+    text = response.text
+    assert "ui://bsuir/widget.html" in text
+    assert "БГУИР • ИИС Виджет" in text
+

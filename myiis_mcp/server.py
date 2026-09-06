@@ -12,8 +12,10 @@ from typing import Any, Callable, Coroutine, get_type_hints
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Route
+
+from .widget import WIDGET_HTML
 
 from .bsuir.client import BSUIRClient
 from .bsuir.exceptions import (
@@ -211,6 +213,7 @@ class Tool:
         handler: Callable[..., Coroutine[Any, Any, Any]],
         annotations: ToolAnnotations,
         title: str | None = None,
+        meta: dict[str, Any] | None = None,
     ):
         self.name = name
         self.description = description
@@ -218,6 +221,7 @@ class Tool:
         self.handler = handler
         self.annotations = annotations
         self.title = title
+        self.meta = meta or {}
 
     def to_mcp_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -227,6 +231,39 @@ class Tool:
         }
         if self.annotations:
             data["annotations"] = self.annotations.to_mcp_dict()
+        if self.meta:
+            data["_meta"] = self.meta
+        return data
+
+
+class Resource:
+    """Registered MCP resource."""
+
+    def __init__(
+        self,
+        uri: str,
+        name: str,
+        description: str,
+        mime_type: str,
+        text: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ):
+        self.uri = uri
+        self.name = name
+        self.description = description
+        self.mime_type = mime_type
+        self.text = text
+        self.meta = meta or {}
+
+    def to_mcp_dict(self) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "uri": self.uri,
+            "name": self.name,
+            "description": self.description,
+            "mimeType": self.mime_type,
+        }
+        if self.meta:
+            data["_meta"] = self.meta
         return data
 
 
@@ -298,6 +335,7 @@ class MCPServer:
         self.instructions = instructions
         self.version = version
         self.tools: dict[str, Tool] = {}
+        self.resources: dict[str, Resource] = {}
         self._custom_routes: list[Route] = []
 
     def tool(
@@ -306,6 +344,7 @@ class MCPServer:
         title: str | None = None,
         description: str | None = None,
         annotations: ToolAnnotations | None = None,
+        meta: dict[str, Any] | None = None,
     ):
         """Decorator to register an async function as an MCP tool."""
 
@@ -322,11 +361,33 @@ class MCPServer:
                 handler=func,
                 annotations=tool_annotations,
                 title=title,
+                meta=meta,
             )
             self.tools[tool_name] = registered_tool
             return func
 
         return decorator
+
+    def register_resource(
+        self,
+        uri: str,
+        name: str,
+        description: str,
+        mime_type: str,
+        text: str | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> Resource:
+        """Register a static or UI resource (e.g. MCP Apps UI widget)."""
+        res = Resource(
+            uri=uri,
+            name=name,
+            description=description,
+            mime_type=mime_type,
+            text=text,
+            meta=meta,
+        )
+        self.resources[uri] = res
+        return res
 
     def custom_route(self, path: str, methods: list[str] | None = None):
         """Register a custom Starlette route on the MCP application."""
@@ -370,7 +431,11 @@ class MCPServer:
                 "capabilities": {
                     "tools": {
                         "listChanged": False,
-                    }
+                    },
+                    "resources": {
+                        "subscribe": False,
+                        "listChanged": False,
+                    },
                 },
                 "serverInfo": {
                     "name": self.name,
@@ -392,6 +457,36 @@ class MCPServer:
             }
             return {"jsonrpc": jsonrpc, "id": req_id, "result": result}
 
+        if method == "resources/list":
+            result = {
+                "resources": [r.to_mcp_dict() for r in self.resources.values()]
+            }
+            return {"jsonrpc": jsonrpc, "id": req_id, "result": result}
+
+        if method == "resources/read":
+            uri = params.get("uri")
+            if uri not in self.resources:
+                return {
+                    "jsonrpc": jsonrpc,
+                    "id": req_id,
+                    "error": {
+                        "code": -32602,
+                        "message": f"Resource '{uri}' not found",
+                    },
+                }
+            res = self.resources[uri]
+            entry: dict[str, Any] = {
+                "uri": res.uri,
+                "mimeType": res.mime_type,
+                "text": res.text or "",
+            }
+            if res.meta:
+                entry["_meta"] = res.meta
+            return {"jsonrpc": jsonrpc, "id": req_id, "result": {"contents": [entry]}}
+
+        if method == "resources/templates/list":
+            return {"jsonrpc": jsonrpc, "id": req_id, "result": {"resourceTemplates": []}}
+
         if method == "tools/call":
             tool_name = params.get("name")
             tool_args = params.get("arguments", {}) or {}
@@ -410,10 +505,21 @@ class MCPServer:
                 coerced_args = _coerce_tool_args(tool.handler, tool_args)
                 raw_result = await tool.handler(**coerced_args)
                 text_content = _serialize_result(raw_result)
+
+                structured: Any = None
+                if hasattr(raw_result, "to_dict"):
+                    structured = raw_result.to_dict()
+                elif isinstance(raw_result, (dict, list)):
+                    structured = raw_result
+
                 result = {
                     "content": [{"type": "text", "text": text_content}],
                     "isError": False,
                 }
+                if structured is not None:
+                    result["structuredContent"] = structured
+                if tool.meta:
+                    result["_meta"] = tool.meta
             except Exception as exc:
                 result = {
                     "content": [
@@ -607,6 +713,65 @@ mcp = MCPServer(
 
 _service = ScheduleService()
 
+# ---------------------------------------------------------------------------
+# ChatGPT Apps SDK / MCP Apps Widget Resource & Metadata
+# ---------------------------------------------------------------------------
+
+WIDGET_RESOURCE_URI = "ui://bsuir/widget.html"
+
+WIDGET_CSP = {
+    "connectDomains": [
+        "https://myiis-mcp.vlad-vasilevskiy-07.workers.dev",
+        "https://iis.bsuir.by",
+    ],
+    "resourceDomains": [
+        "https://iis.bsuir.by",
+        "https://cdn.jsdelivr.net",
+        "https://fonts.googleapis.com",
+        "https://fonts.gstatic.com",
+    ],
+}
+
+WIDGET_CSP_LEGACY = {
+    "connect_domains": [
+        "https://myiis-mcp.vlad-vasilevskiy-07.workers.dev",
+        "https://iis.bsuir.by",
+    ],
+    "resource_domains": [
+        "https://iis.bsuir.by",
+        "https://cdn.jsdelivr.net",
+        "https://fonts.googleapis.com",
+        "https://fonts.gstatic.com",
+    ],
+}
+
+WIDGET_RESOURCE_META = {
+    "ui": {
+        "prefersBorder": True,
+        "csp": WIDGET_CSP,
+    },
+    "openai/widgetPrefersBorder": True,
+    "openai/widgetDescription": "Интерактивная карточка расписания занятий или профиля преподавателя БГУИР",
+    "openai/widgetCSP": WIDGET_CSP_LEGACY,
+}
+
+WIDGET_TOOL_META = {
+    "ui": {
+        "resourceUri": WIDGET_RESOURCE_URI,
+    },
+    "openai/outputTemplate": WIDGET_RESOURCE_URI,
+    "openai/widgetPrefersBorder": True,
+}
+
+mcp.register_resource(
+    uri=WIDGET_RESOURCE_URI,
+    name="BSUIR Schedule & Teacher Profile Widget",
+    description="Интерактивный виджет расписания занятий и профиля преподавателя БГУИР для ChatGPT Apps SDK",
+    mime_type="text/html;profile=mcp-app",
+    text=WIDGET_HTML,
+    meta=WIDGET_RESOURCE_META,
+)
+
 
 @mcp.tool(
     name="get_group_schedule",
@@ -622,6 +787,7 @@ _service = ScheduleService()
         destructive_hint=False,
         open_world_hint=False,
     ),
+    meta=WIDGET_TOOL_META,
 )
 async def get_group_schedule(
     group: str = Field(description="Номер учебной группы (например, '310101')"),
@@ -682,6 +848,7 @@ async def get_group_schedule(
         destructive_hint=False,
         open_world_hint=False,
     ),
+    meta=WIDGET_TOOL_META,
 )
 async def get_teacher_schedule(
     teacher: str = Field(
@@ -741,6 +908,7 @@ async def get_teacher_schedule(
         destructive_hint=False,
         open_world_hint=False,
     ),
+    meta=WIDGET_TOOL_META,
 )
 async def get_teacher_profile(
     teacher: str = Field(
@@ -768,6 +936,49 @@ async def get_teacher_profile(
             url_id=teacher,
             summary=f"Ошибка сервиса БГУИР: {exc}. Попробуйте повторить запрос позже.",
         )
+
+
+@mcp.tool(
+    name="render_schedule_widget",
+    title="Render Interactive Schedule or Teacher Widget",
+    description=(
+        "Отобразить интерактивный визуальный виджет расписания или профиля преподавателя БГУИР "
+        "непосредственно в интерфейсе ChatGPT (стандарт ChatGPT Apps SDK / MCP Apps). "
+        "Позволяет показать карточку пар или контактов с возможностью интерактивного взаимодействия."
+    ),
+    annotations=ToolAnnotations(
+        read_only_hint=True,
+        destructive_hint=False,
+        open_world_hint=False,
+    ),
+    meta=WIDGET_TOOL_META,
+)
+async def render_schedule_widget(
+    group: str | None = Field(
+        default=None, description="Номер учебной группы для виджета (например, '520601')"
+    ),
+    teacher: str | None = Field(
+        default=None,
+        description="Фамилия или ФИО преподавателя для виджета (например, 'Лаппо', 'Герман')",
+    ),
+    date: str | None = Field(
+        default="today",
+        description="Дата расписания ('today', 'tomorrow', '2026-09-07' или 'week')",
+    ),
+) -> Any:
+    """Explicitly render interactive schedule or teacher profile widget."""
+    if teacher and not group:
+        if date and date != "none":
+            return await _service.get_teacher_schedule(teacher=teacher, date_query=date)
+        return await _service.get_teacher_details(teacher=teacher)
+    if group:
+        return await _service.get_group_schedule(group_number=group, date_query=date or "today")
+    return ScheduleResult(
+        target="БГУИР",
+        target_type="info",
+        current_week=1,
+        summary="Укажите номер группы или преподавателя для отображения виджета.",
+    )
 
 
 @mcp.tool(
@@ -881,6 +1092,18 @@ async def health_check(request: Request) -> JSONResponse:
     )
 
 
+@mcp.custom_route("/widget", methods=["GET"])
+async def widget_html(request: Request) -> HTMLResponse:
+    """Serve the interactive ChatGPT Apps SDK / MCP Apps widget HTML."""
+    return HTMLResponse(WIDGET_HTML)
+
+
+@mcp.custom_route("/widget.html", methods=["GET"])
+async def widget_html_alias(request: Request) -> HTMLResponse:
+    """Serve the interactive ChatGPT Apps SDK / MCP Apps widget HTML alias."""
+    return HTMLResponse(WIDGET_HTML)
+
+
 @mcp.custom_route("/", methods=["GET"])
 async def root_info(request: Request) -> JSONResponse:
     """Server discovery and information endpoint."""
@@ -893,6 +1116,7 @@ async def root_info(request: Request) -> JSONResponse:
             "endpoints": {
                 "mcp": "/mcp",
                 "health": "/health",
+                "widget": "/widget",
             },
             "status": "running",
         }
