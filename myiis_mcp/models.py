@@ -55,6 +55,21 @@ class DaySchedule:
 
 
 @dataclass
+class TeacherDepartmentContact:
+    """Department contact details for a teacher."""
+
+    department: str | None = None
+    job_position: str | None = None
+    phone: str | None = None
+    auditory: str | None = None
+    building: str | None = None
+    address: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
+
+
+@dataclass
 class ScheduleResult:
     """Comprehensive schedule result for a group or teacher."""
 
@@ -65,6 +80,7 @@ class ScheduleResult:
     query_date: str | None = None
     days: list[DaySchedule] = field(default_factory=list)
     total_lessons: int = 0
+    teacher_contacts: list[TeacherDepartmentContact] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return _to_dict(self)
@@ -151,3 +167,35 @@ class CurrentWeekResponse:
     def model_dump_json(self, indent: int = 2) -> str:
         import json
         return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+
+
+@dataclass
+class TeacherProfileResponse:
+    """Full teacher profile with contacts, departments, reading courses, and links."""
+
+    fio: str
+    url_id: str
+    summary: str
+    first_name: str | None = None
+    middle_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    degree: str | None = None
+    rank: str | None = None
+    photo_url: str | None = None
+    profile_url: str | None = None
+    schedule_url: str | None = None
+    repository_url: str | None = None
+    departments: list[str] = field(default_factory=list)
+    reading_courses: list[str] = field(default_factory=list)
+    contacts: list[TeacherDepartmentContact] = field(default_factory=list)
+    profile_links: list[dict[str, str]] = field(default_factory=list)
+    additional_info: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
+
+    def model_dump_json(self, indent: int = 2) -> str:
+        import json
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
+

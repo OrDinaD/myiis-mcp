@@ -61,6 +61,7 @@ def test_mcp_list_tools(client):
     expected_tools = [
         "get_group_schedule",
         "get_teacher_schedule",
+        "get_teacher_profile",
         "search_groups",
         "search_teachers",
         "get_current_week",
@@ -77,6 +78,8 @@ async def test_tool_direct_call():
     tools = await mcp.list_tools()
     tool_names = [t.name for t in tools]
     assert "get_group_schedule" in tool_names
+    assert "get_teacher_schedule" in tool_names
+    assert "get_teacher_profile" in tool_names
     assert "get_current_week" in tool_names
 
     # Check annotations on get_group_schedule
@@ -85,3 +88,9 @@ async def test_tool_direct_call():
     assert group_tool.annotations.read_only_hint is True
     assert group_tool.annotations.destructive_hint is False
     assert group_tool.annotations.open_world_hint is False
+
+    # Check annotations on get_teacher_profile
+    profile_tool = next(t for t in tools if t.name == "get_teacher_profile")
+    assert profile_tool.annotations is not None
+    assert profile_tool.annotations.read_only_hint is True
+

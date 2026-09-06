@@ -13,6 +13,8 @@ from .models import (
     GroupSearchResponse,
     NormalizedLesson,
     ScheduleResult,
+    TeacherDepartmentContact,
+    TeacherProfileResponse,
     TeacherSearchItem,
     TeacherSearchResponse,
 )
@@ -236,10 +238,17 @@ class ScheduleService:
             if not matches:
                 raise ValueError(f"Преподаватель '{clean_t}' не найден. Проверьте правильность написания фамилии.")
             if len(matches) > 1:
-                options = ", ".join([f"{m.display_name} ({', '.join(m.academic_department) or m.url_id})" for m in matches[:5]])
-                raise ValueError(f"Найдено несколько преподавателей по запросу '{clean_t}': {options}. Уточните ФИО.")
-            url_id = matches[0].url_id or clean_t
-            display_teacher = matches[0].display_name
+                exact = [m for m in matches if m.last_name and m.last_name.lower() == clean_t.lower()]
+                if len(exact) == 1:
+                    matched_emp = exact[0]
+                else:
+                    options = ", ".join([f"{m.display_name} ({', '.join(m.academic_department) or m.url_id})" for m in matches[:5]])
+                    raise ValueError(f"Найдено несколько преподавателей по запросу '{clean_t}': {options}. Уточните ФИО.")
+            else:
+                matched_emp = matches[0]
+
+            url_id = matched_emp.url_id or clean_t
+            display_teacher = matched_emp.display_name
         else:
             display_teacher = url_id
 
@@ -250,6 +259,25 @@ class ScheduleService:
         if raw_schedule.employee_dto:
             display_teacher = raw_schedule.employee_dto.display_name
 
+        # Try to fetch teacher department contacts from details
+        teacher_contacts: list[TeacherDepartmentContact] = []
+        try:
+            details = await self.client.get_employee_details(url_id)
+            for job in details.job_positions:
+                for c in job.contacts:
+                    teacher_contacts.append(
+                        TeacherDepartmentContact(
+                            department=c.department or job.department,
+                            job_position=job.job_position,
+                            phone=c.phone_number,
+                            auditory=c.auditory,
+                            building=c.building_number,
+                            address=c.address,
+                        )
+                    )
+        except Exception:
+            pass
+
         return self._build_schedule_result(
             raw_schedule=raw_schedule,
             target=display_teacher,
@@ -259,6 +287,7 @@ class ScheduleService:
             subgroup=subgroup,
             current_week=current_week,
             base_date=base_date,
+            teacher_contacts=teacher_contacts,
         )
 
     def _build_schedule_result(
@@ -271,7 +300,9 @@ class ScheduleService:
         subgroup: int | None,
         current_week: int,
         base_date: date,
+        teacher_contacts: list[TeacherDepartmentContact] | None = None,
     ) -> ScheduleResult:
+        contacts = teacher_contacts or []
         schedules = raw_schedule.schedules or {}
         days_result: list[DaySchedule] = []
         total_lessons = 0
@@ -334,8 +365,22 @@ class ScheduleService:
         if target_date is not None:
             if total_lessons == 0:
                 summary = f"На {query_date_str} для {target} занятий не запланировано (выходной или нет пар)."
+                if contacts and (contacts[0].auditory or contacts[0].phone):
+                    c = contacts[0]
+                    c_info = []
+                    if c.auditory:
+                        c_info.append(f"кабинет ауд. {c.auditory} {c.building or ''}".strip())
+                    if c.phone:
+                        c_info.append(f"телефон {c.phone}")
+                    if c.department:
+                        c_info.append(f"кафедра {c.department}")
+                    if c_info:
+                        summary += f" Контакты кафедры ({', '.join(c_info)})."
             else:
                 summary = f"Расписание для {target} на {query_date_str}: найдено {total_lessons} занятий."
+                if contacts and contacts[0].auditory:
+                    c = contacts[0]
+                    summary += f" Кафедра: {c.department or ''} (ауд. {c.auditory} {c.building or ''}, тел. {c.phone or ''}).".replace("  ", " ")
         else:
             summary = f"Полное недельное расписание для {target}: {total_lessons} занятий в течение недели (текущая неделя: {current_week})."
 
@@ -347,6 +392,114 @@ class ScheduleService:
             days=days_result,
             total_lessons=total_lessons,
             summary=summary,
+            teacher_contacts=contacts,
+        )
+
+    async def get_teacher_details(self, teacher: str) -> TeacherProfileResponse:
+        """Fetch full details, contacts, reading courses, and links for a teacher."""
+        clean_t = teacher.strip()
+        url_id = clean_t
+
+        if any("\u0400" <= c <= "\u04ff" for c in clean_t) or " " in clean_t:
+            matches = await self.client.find_employees(clean_t)
+            if not matches:
+                raise ValueError(f"Преподаватель '{clean_t}' не найден. Проверьте правильность написания фамилии.")
+            if len(matches) > 1:
+                exact = [m for m in matches if m.last_name and m.last_name.lower() == clean_t.lower()]
+                if len(exact) == 1:
+                    matched_emp = exact[0]
+                else:
+                    options = ", ".join([f"{m.display_name} ({', '.join(m.academic_department) or m.url_id})" for m in matches[:5]])
+                    raise ValueError(f"Найдено несколько преподавателей по запросу '{clean_t}': {options}. Уточните ФИО.")
+            else:
+                matched_emp = matches[0]
+            url_id = matched_emp.url_id or clean_t
+
+        raw = await self.client.get_employee_details(url_id)
+
+        contacts: list[TeacherDepartmentContact] = []
+        departments: list[str] = []
+        for job in raw.job_positions:
+            if job.department and job.department not in departments:
+                departments.append(job.department)
+            for c in job.contacts:
+                contacts.append(
+                    TeacherDepartmentContact(
+                        department=c.department or job.department,
+                        job_position=job.job_position,
+                        phone=c.phone_number,
+                        auditory=c.auditory,
+                        building=c.building_number,
+                        address=c.address,
+                    )
+                )
+
+        profile_url = f"https://iis.bsuir.by/employees/{raw.url_id}" if raw.url_id else None
+        schedule_url = f"https://iis.bsuir.by/schedule/{raw.url_id}" if raw.url_id else None
+        photo_url = f"https://iis.bsuir.by/api/v1/employees/photo/{raw.id}" if raw.id else None
+
+        import urllib.parse
+
+        initials = f"{(raw.first_name or '')[:1]}. {(raw.middle_name or '')[:1]}.".strip()
+        repo_author = f"{raw.last_name or ''} {initials}".strip()
+        repo_url = (
+            f"https://libeldoc.bsuir.by/simple-search?filterquery={urllib.parse.quote(repo_author)}&filtername=author&filtertype=equals"
+            if raw.last_name
+            else None
+        )
+
+        profile_links = [{"type": l.link_type or "external", "url": l.link} for l in raw.profile_links if l.link]
+
+        additional_info: dict[str, str] = {}
+        for info in raw.additional_information:
+            if info.name_type and info.content:
+                additional_info[info.name_type] = info.content
+
+        # Human summary
+        fio = raw.display_name
+        summary_parts = [fio]
+        rank_deg = ", ".join([p for p in [raw.rank, raw.degree] if p])
+        if rank_deg:
+            summary_parts.append(f"({rank_deg})")
+        if departments:
+            summary_parts.append(f"— {', '.join(departments)}")
+        if raw.email:
+            summary_parts.append(f"Email: {raw.email}")
+        if contacts:
+            c_desc = []
+            for c in contacts:
+                aud = f"ауд. {c.auditory}" if c.auditory else ""
+                bld = f"({c.building})" if c.building else ""
+                ph = f"тел. {c.phone}" if c.phone else ""
+                part = " ".join([p for p in [aud, bld, ph] if p])
+                if part:
+                    c_desc.append(part)
+            if c_desc:
+                summary_parts.append(f"Кабинет: {'; '.join(c_desc)}")
+        if raw.reading_courses:
+            summary_parts.append(f"Читаемые курсы: {', '.join(raw.reading_courses)}")
+
+        summary = ". ".join(summary_parts) + "."
+
+        return TeacherProfileResponse(
+            fio=fio,
+            url_id=raw.url_id or url_id,
+            summary=summary,
+            first_name=raw.first_name,
+            middle_name=raw.middle_name,
+            last_name=raw.last_name,
+            email=raw.email,
+            degree=raw.degree,
+            rank=raw.rank,
+            photo_url=photo_url,
+            profile_url=profile_url,
+            schedule_url=schedule_url,
+            repository_url=repo_url,
+            departments=departments,
+            reading_courses=raw.reading_courses,
+            contacts=contacts,
+            profile_links=profile_links,
+            additional_info=additional_info,
         )
 
     async def search_groups(

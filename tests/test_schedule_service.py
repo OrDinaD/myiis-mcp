@@ -96,3 +96,51 @@ async def test_schedule_service_date_filter(monkeypatch):
     # Query for Monday of week 2 with subgroup 2 (should be 0 lessons since Physics is for subgroup 1)
     result_sub2 = await service.get_group_schedule("123456", date_query="2026-09-14", subgroup=2, base_date=base)
     assert result_sub2.total_lessons == 0
+
+
+@pytest.mark.asyncio
+async def test_schedule_service_teacher_details():
+    from myiis_mcp.bsuir.models import EmployeeDetails, JobPosition, EmployeeContact
+
+    mock_details = EmployeeDetails(
+        id=506004,
+        first_name="Юлия",
+        middle_name="Олеговна",
+        last_name="Герман",
+        degree="к.т.н.",
+        rank="доцент",
+        email="jgerman@bsuir.by",
+        url_id="iu-german",
+        job_positions=[
+            JobPosition(
+                job_position="доцент",
+                department="Каф.ИТАС",
+                contacts=[
+                    EmployeeContact(
+                        phone_number="+375172938904",
+                        auditory="605а",
+                        building_number="5 к.",
+                    )
+                ],
+            )
+        ],
+        reading_courses=["Мобильные приложения"],
+    )
+
+    class MockBSUIRClient:
+        async def find_employees(self, query):
+            return [Employee(first_name="Юлия", last_name="Герман", url_id="iu-german")]
+
+        async def get_employee_details(self, url_id):
+            return mock_details
+
+    service = ScheduleService(client=MockBSUIRClient())
+    profile = await service.get_teacher_details("Герман")
+    assert profile.email == "jgerman@bsuir.by"
+    assert profile.fio == "Герман Юлия Олеговна"
+    assert "Мобильные приложения" in profile.reading_courses
+    assert len(profile.contacts) == 1
+    assert profile.contacts[0].auditory == "605а"
+    assert "https://libeldoc.bsuir.by" in profile.repository_url
+    assert "https://iis.bsuir.by/employees/iu-german" == profile.profile_url
+

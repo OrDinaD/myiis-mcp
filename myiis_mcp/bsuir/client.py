@@ -13,6 +13,7 @@ from .exceptions import (
 from .models import (
     BSUIRScheduleResponse,
     Employee,
+    EmployeeDetails,
     StudentGroup,
 )
 
@@ -40,16 +41,31 @@ class BSUIRClient:
         self._groups_cache_time: float = 0.0
         self._employees_cache: list[Employee] | None = None
         self._employees_cache_time: float = 0.0
+        self._details_cache: dict[str, tuple[float, EmployeeDetails]] = {}
+        self._client_loop: Any = None
 
     async def _get_client(self) -> httpx.AsyncClient:
+        import asyncio
+
         if self._external_client is not None:
             return self._external_client
-        if self._internal_client is None or self._internal_client.is_closed:
+
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        if (
+            self._internal_client is None
+            or self._internal_client.is_closed
+            or self._client_loop is not current_loop
+        ):
             self._internal_client = httpx.AsyncClient(
                 base_url=self.base_url,
                 timeout=self.timeout,
                 headers={"User-Agent": "MyIIS-MCP-Server/1.0 (+https://github.com/OrDinaD/myiis-mcp)"},
             )
+            self._client_loop = current_loop
         return self._internal_client
 
     async def close(self) -> None:
@@ -152,6 +168,28 @@ class BSUIRClient:
         data = response.json()
         return BSUIRScheduleResponse.from_dict(data)
 
+    async def get_employee_details(self, url_id: str, force_refresh: bool = False) -> EmployeeDetails:
+        """Fetch detailed profile information for an employee by urlId."""
+        clean_url_id = url_id.strip()
+        now = time.time()
+        if not force_refresh and clean_url_id in self._details_cache:
+            cache_time, cached_val = self._details_cache[clean_url_id]
+            if (now - cache_time) < CACHE_TTL:
+                return cached_val
+
+        response = await self._request("GET", "/employees/details-url", params={"urlId": clean_url_id})
+        if response.status_code == 404:
+            raise TeacherNotFoundError(clean_url_id)
+        if response.status_code != 200:
+            raise BSUIRApiError(
+                f"Ошибка API БГУИР при получении деталей преподавателя {clean_url_id} (HTTP {response.status_code})",
+                status_code=response.status_code,
+            )
+        data = response.json()
+        details = EmployeeDetails.from_dict(data)
+        self._details_cache[clean_url_id] = (now, details)
+        return details
+
     async def find_groups(
         self,
         query: str,
@@ -197,9 +235,12 @@ class BSUIRClient:
         department: str | None = None,
         limit: int = 20,
     ) -> list[Employee]:
-        """Search employees by name / surname / FIO / department."""
+        """Search employees by name / surname / FIO / department, with token and typo tolerance."""
         all_employees = await self.get_employees()
         q = query.strip().lower()
+        tokens = [t for t in q.split() if t]
+        if not tokens:
+            return []
 
         results: list[Employee] = []
         for emp in all_employees:
@@ -209,18 +250,64 @@ class BSUIRClient:
                 if not has_dep:
                     continue
 
-            name_match = (
-                (emp.fio and q in emp.fio.lower())
-                or (emp.last_name and q in emp.last_name.lower())
-                or (emp.first_name and q in emp.first_name.lower())
-                or (emp.middle_name and q in emp.middle_name.lower())
-                or (emp.url_id and q in emp.url_id.lower())
-            )
+            # Check department match
             dep_match = any(q in d.lower() for d in emp.academic_department)
+
+            # Combined string for token matching
+            full_text = " ".join(
+                filter(
+                    None,
+                    [
+                        emp.last_name,
+                        emp.first_name,
+                        emp.middle_name,
+                        emp.fio,
+                        emp.url_id,
+                    ],
+                )
+            ).lower()
+
+            name_match = all(t in full_text for t in tokens)
 
             if name_match or dep_match:
                 results.append(emp)
-                if len(results) >= limit:
-                    break
 
-        return results
+        if results:
+            # Sort by best match (exact surname/fio first)
+            def rank(e: Employee) -> int:
+                ln = (e.last_name or "").lower()
+                fio = (e.fio or "").lower()
+                if ln == q or fio == q or (e.url_id or "").lower() == q:
+                    return 0
+                if ln.startswith(tokens[0]):
+                    return 1
+                return 2
+
+            results.sort(key=rank)
+            return results[:limit]
+
+        # Fuzzy matching fallback for typos (e.g. "лапо" -> "Лаппо")
+        import difflib
+
+        ln_map: dict[str, list[Employee]] = {}
+        for emp in all_employees:
+            if department is not None:
+                dep_q = department.strip().lower()
+                if not any(dep_q in d.lower() for d in emp.academic_department):
+                    continue
+            ln = (emp.last_name or "").lower()
+            if ln:
+                ln_map.setdefault(ln, []).append(emp)
+
+        close_last_names = difflib.get_close_matches(tokens[0], list(ln_map.keys()), n=min(limit, 5), cutoff=0.65)
+        fuzzy_results: list[Employee] = []
+        for matched_ln in close_last_names:
+            for emp in ln_map[matched_ln]:
+                if emp not in fuzzy_results:
+                    fuzzy_results.append(emp)
+                    if len(fuzzy_results) >= limit:
+                        break
+            if len(fuzzy_results) >= limit:
+                break
+
+        return fuzzy_results

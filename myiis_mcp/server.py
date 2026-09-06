@@ -27,6 +27,7 @@ from .models import (
     CurrentWeekResponse,
     GroupSearchResponse,
     ScheduleResult,
+    TeacherProfileResponse,
     TeacherSearchResponse,
 )
 from .schedule_service import ScheduleService
@@ -37,17 +38,19 @@ SERVER_INSTRUCTIONS = """
 
 Основные возможности:
 1. get_group_schedule: получение расписания группы (на сегодня, завтра, конкретную дату или всю неделю).
-2. get_teacher_schedule: получение расписания преподавателя по фамилии или urlId.
-3. search_groups: поиск учебной группы по номеру или специальности.
-4. search_teachers: поиск преподавателя по фамилии или кафедре.
-5. get_current_week: получение номера текущей учебной недели (1-4) и сегодняшней даты.
+2. get_teacher_schedule: получение расписания преподавателя по фамилии или urlId (где найти преподавателя, аудитории занятий и контакты кафедры).
+3. get_teacher_profile: получение контактов преподавателя (email, телефон кафедры, кабинет/аудитория, читаемые курсы/дисциплины, ссылки на профиль и репозиторий публикаций БГУИР).
+4. search_groups: поиск учебной группы по номеру или специальности.
+5. search_teachers: поиск преподавателя по фамилии, имени или кафедре.
+6. get_current_week: получение номера текущей учебной недели (1-4) и сегодняшней даты.
 
-Правила работы с расписанием:
+Правила работы:
 - В БГУИР действует 4-недельный учебный цикл (недели 1, 2, 3, 4).
 - Если пользователь спрашивает расписание на 'сегодня' или 'завтра', передавайте в date значение 'today' или 'tomorrow'.
 - Даты также можно передавать в формате 'ГГГГ-ММ-ДД' (например, '2026-09-07').
-- Для фильтрации по подгруппе передавайте subgroup=1 или subgroup=2.
-- Если номер группы или фамилия преподавателя неизвестны, сначала используйте инструменты поиска.
+- Чтобы узнать контакты преподавателя (email, телефон, аудиторию кафедры, читаемые предметы), используйте get_teacher_profile.
+- Чтобы узнать, где найти преподавателя в определенный день (аудитории пар, группы), используйте get_teacher_schedule.
+- Если фамилия преподавателя введена с возможной опечаткой (например, 'лапо' вместо 'Лаппо'), сервер автоматически подберет наиболее подходящего сотрудника.
 """.strip()
 
 
@@ -720,6 +723,49 @@ async def get_teacher_schedule(
             target_type="teacher",
             current_week=0,
             query_date=date,
+            summary=f"Ошибка сервиса БГУИР: {exc}. Попробуйте повторить запрос позже.",
+        )
+
+
+@mcp.tool(
+    name="get_teacher_profile",
+    title="Get Teacher Profile and Contacts",
+    description=(
+        "Получить подробную карточку преподавателя БГУИР: контактные данные (email, телефон кафедры, "
+        "номер аудитории и корпус), должность, ученую степень и звание, читаемые курсы/дисциплины, "
+        "а также прямые ссылки на расписание, страницу сотрудника и репозиторий публикаций БГУИР. "
+        "Принимает фамилию преподавателя (например, 'Герман', 'Лаппо', 'Василькова'), ФИО или urlId (например, 'iu-german')."
+    ),
+    annotations=ToolAnnotations(
+        read_only_hint=True,
+        destructive_hint=False,
+        open_world_hint=False,
+    ),
+)
+async def get_teacher_profile(
+    teacher: str = Field(
+        description="Фамилия преподавателя (например, 'Герман', 'Лаппо'), ФИО или urlId (например, 'iu-german')"
+    ),
+) -> TeacherProfileResponse:
+    """Get detailed profile and contacts for a university teacher."""
+    try:
+        return await _service.get_teacher_details(teacher=teacher)
+    except TeacherNotFoundError as exc:
+        return TeacherProfileResponse(
+            fio=teacher,
+            url_id=teacher,
+            summary=f"Ошибка: {exc.message} Проверьте правильность написания фамилии или используйте search_teachers.",
+        )
+    except ValueError as exc:
+        return TeacherProfileResponse(
+            fio=teacher,
+            url_id=teacher,
+            summary=f"Ошибка: {exc}",
+        )
+    except (BSUIRTimeoutError, BSUIRApiError, BSUIRError) as exc:
+        return TeacherProfileResponse(
+            fio=teacher,
+            url_id=teacher,
             summary=f"Ошибка сервиса БГУИР: {exc}. Попробуйте повторить запрос позже.",
         )
 

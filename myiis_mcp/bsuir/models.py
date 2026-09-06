@@ -236,3 +236,147 @@ class BSUIRScheduleResponse:
             current_period=data.get("currentPeriod"),
             is_zaoch_or_dist=_bool_or_false(data.get("isZaochOrDist")),
         )
+
+
+@dataclass
+class EmployeeContact:
+    """Contact details for an employee within a department."""
+
+    phone_id: int | None = None
+    phone_number: str | None = None
+    address: str | None = None
+    auditory: str | None = None
+    building_number: str | None = None
+    department: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EmployeeContact":
+        return cls(
+            phone_id=_int_or_none(data.get("phoneId")),
+            phone_number=_str_or_none(data.get("phoneNumber")),
+            address=_str_or_none(data.get("address")),
+            auditory=_str_or_none(data.get("auditory")),
+            building_number=_str_or_none(data.get("buildingNumber")),
+            department=_str_or_none(data.get("department")),
+        )
+
+
+@dataclass
+class JobPosition:
+    """Job position and department of an employee."""
+
+    employee_department_id: int | None = None
+    job_position: str | None = None
+    department: str | None = None
+    contacts: list[EmployeeContact] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "JobPosition":
+        raw_contacts = data.get("contacts") or []
+        contacts = [EmployeeContact.from_dict(c) for c in raw_contacts if isinstance(c, dict)]
+        return cls(
+            employee_department_id=_int_or_none(data.get("employeeDepartmentId")),
+            job_position=_str_or_none(data.get("jobPosition")),
+            department=_str_or_none(data.get("department")),
+            contacts=contacts,
+        )
+
+
+@dataclass
+class AdditionalInfo:
+    """Additional information block (Education, Career, Publications, etc.)."""
+
+    id: int | None = None
+    id_type: int | None = None
+    name_type: str | None = None
+    content: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AdditionalInfo":
+        raw_content = _str_or_none(data.get("content"))
+        clean_content = None
+        if raw_content:
+            import re
+
+            cleaned = re.sub(r"<[^>]+>", " ", raw_content)
+            clean_content = " ".join(cleaned.split()) or None
+
+        return cls(
+            id=_int_or_none(data.get("id")),
+            id_type=_int_or_none(data.get("idType")),
+            name_type=_str_or_none(data.get("nameType")),
+            content=clean_content,
+        )
+
+
+@dataclass
+class ProfileLink:
+    """External profile link (Google Scholar, etc.)."""
+
+    link: str
+    link_type: str | None = None
+    id: int | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "ProfileLink":
+        return cls(
+            link=str(data.get("link", "")),
+            link_type=_str_or_none(data.get("profileLinkType")),
+            id=_int_or_none(data.get("profileLinkEmployeeId")),
+        )
+
+
+@dataclass
+class EmployeeDetails:
+    """Detailed employee / teacher information from /api/v1/employees/details-url."""
+
+    id: int | None = None
+    first_name: str | None = None
+    middle_name: str | None = None
+    last_name: str | None = None
+    degree: str | None = None
+    degree_abbrev: str | None = None
+    rank: str | None = None
+    email: str | None = None
+    url_id: str | None = None
+    calendar_id: str | None = None
+    chief: bool = False
+    job_positions: list[JobPosition] = field(default_factory=list)
+    reading_courses: list[str] = field(default_factory=list)
+    additional_information: list[AdditionalInfo] = field(default_factory=list)
+    profile_links: list[ProfileLink] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "EmployeeDetails":
+        raw_jobs = data.get("jobPositions") or []
+        job_positions = [JobPosition.from_dict(j) for j in raw_jobs if isinstance(j, dict)]
+
+        raw_info = data.get("additionalInformation") or []
+        additional_info = [AdditionalInfo.from_dict(i) for i in raw_info if isinstance(i, dict)]
+
+        raw_links = data.get("profileLinks") or []
+        profile_links = [ProfileLink.from_dict(l) for l in raw_links if isinstance(l, dict)]
+
+        return cls(
+            id=_int_or_none(data.get("id")),
+            first_name=_str_or_none(data.get("firstName")),
+            middle_name=_str_or_none(data.get("middleName")),
+            last_name=_str_or_none(data.get("lastName")),
+            degree=_str_or_none(data.get("degree")),
+            degree_abbrev=_str_or_none(data.get("degreeAbbrev")),
+            rank=_str_or_none(data.get("rank")),
+            email=_str_or_none(data.get("email")),
+            url_id=_str_or_none(data.get("urlId")),
+            calendar_id=_str_or_none(data.get("calendarId")),
+            chief=_bool_or_false(data.get("chief")),
+            job_positions=job_positions,
+            reading_courses=_coerce_str_list(data.get("readingCourses")),
+            additional_information=additional_info,
+            profile_links=profile_links,
+        )
+
+    @property
+    def display_name(self) -> str:
+        parts = [p for p in [self.last_name, self.first_name, self.middle_name] if p]
+        return " ".join(parts) if parts else (self.url_id or "Преподаватель")
+
