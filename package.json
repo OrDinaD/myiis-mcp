@@ -1,0 +1,14 @@
+{
+  "name": "myiis-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MyIIS MCP Server for ChatGPT - BSUIR schedule & IIS integration",
+  "scripts": {
+    "dev": "uv run pywrangler dev",
+    "deploy": "uv run pywrangler deploy",
+    "build": "uv run pywrangler sync"
+  },
+  "devDependencies": {
+    "wrangler": "^4.129.0"
+  }
+}

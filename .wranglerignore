@@ -1,3 +1,6 @@
 .venv/
+.venv-workers/
 tests/
 scratch/
+dist/
+.pytest_cache/

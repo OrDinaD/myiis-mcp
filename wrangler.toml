@@ -1,4 +1,10 @@
 name = "myiis-mcp"
 main = "worker.py"
-compatibility_date = "2026-08-28"
-compatibility_flags = ["python_workers"]
+compatibility_date = "2025-11-02"
+compatibility_flags = [
+    "python_workers",
+    "python_dedicated_snapshot"
+]
+
+[observability]
+enabled = true

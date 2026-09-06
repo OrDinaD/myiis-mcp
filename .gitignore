@@ -38,6 +38,10 @@ htmlcov/
 *.swo
 .DS_Store
 
+# Cloudflare Workers
+.wrangler/
+.venv-workers/
+
 # Local integration scratch directories
 .portfolio_site_repo/
 scratch/

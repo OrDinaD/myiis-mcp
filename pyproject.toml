@@ -7,20 +7,21 @@ name = "myiis-mcp"
 version = "0.1.0"
 description = "MyIIS MCP Server for ChatGPT - BSUIR schedule & IIS integration"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.13"
 license = "MIT"
 authors = [
     { name = "Vladislav Vasilevskiy", email = "Vlad.vasilevskiy.07@gmail.com" }
 ]
 dependencies = [
-    "mcp>=2.1.0",
-    "httpx>=0.28.0",
     "starlette>=0.45.0",
-    "pydantic>=2.10.0",
+    "httpx>=0.28.0",
+    "pydantic==2.10.5",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
+    "workers-py",
+    "workers-runtime-sdk",
     "uvicorn>=0.30.0",
     "pytest>=8.0.0",
     "pytest-asyncio>=0.24.0",
@@ -32,5 +33,4 @@ packages = ["myiis_mcp"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-
 pythonpath = ["."]

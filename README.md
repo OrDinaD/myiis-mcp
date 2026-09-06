@@ -151,20 +151,30 @@ npx @modelcontextprotocol/inspector --cli --transport http --server-url http://1
 
 ## 🚀 Хостинг на Cloudflare Workers
 
-Репозиторий готов для развертывания в Cloudflare Workers с поддержкой Python:
+Репозиторий готов для развертывания в **Cloudflare Python Workers** (Pyodide WebAssembly runtime):
 
-- В проекте настроен `wrangler.toml` с флагом `python_workers`.
+- Настроен `wrangler.toml` с `compatibility_flags = ["python_workers", "python_dedicated_snapshot"]`.
+- Все зависимости (`starlette`, `httpx`, `pydantic`) вендорятся через `pywrangler sync` в `python_modules/` и полностью совместимы с Pyodide.
 - Точка входа `worker.py` использует нативный ASGI-мост Cloudflare (`workers.asgi`).
 
 ### Деплой через Wrangler CLI:
 ```bash
+# Локальная синхронизация пакетов и запуск dev-сервера
+uv run pywrangler dev
+
+# Деплой в Cloudflare
+uv run pywrangler deploy
+# или стандартный:
 npx wrangler deploy
 ```
 
-### Автоматический деплой через GitHub:
-1. В панели управления **Cloudflare Dashboard** перейдите в **Workers & Pages** → **Create application**.
-2. Подключите репозиторий `OrDinaD/myiis-mcp`.
-3. Каждый push в ветку `main` будет автоматически собирать и деплоить сервер на ваш домен (например, `myiis.ordinad.xyz`).
+### Автоматический деплой через GitHub в Cloudflare Dashboard:
+1. В панели управления **Cloudflare Dashboard** перейдите в **Workers & Pages** → выберите проект `myiis-mcp`.
+2. Настройки сборки (Build & Deploy Settings):
+   - **Root directory**: `/`
+   - **Build command**: `None` (или `npm run build`)
+   - **Deploy command**: `npx wrangler deploy` (или `npm run deploy`)
+3. Каждый push в ветку `main` автоматически деплоит сервер на `*.workers.dev` (или привязанный кастомный домен).
 
 ---
 
