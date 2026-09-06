@@ -1,6 +1,6 @@
 """MyIIS MCP Server implementation for ChatGPT, Claude, Cursor and universal MCP clients.
 
-Runs cleanly on Cloudflare Python Workers (Pyodide), uvicorn, and standard ASGI runners.
+Pure Python — no pydantic, no native extensions. Runs cleanly on Cloudflare Python Workers (Pyodide).
 """
 
 from __future__ import annotations
@@ -8,9 +8,8 @@ from __future__ import annotations
 import inspect
 import json
 import uuid
-from typing import Any, Callable, Coroutine
+from typing import Any, Callable, Coroutine, get_type_hints
 
-from pydantic import BaseModel, ConfigDict, Field, create_model
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -52,14 +51,143 @@ SERVER_INSTRUCTIONS = """
 """.strip()
 
 
-class ToolAnnotations(BaseModel):
+# ---------------------------------------------------------------------------
+# JSON Schema helpers (no pydantic)
+# ---------------------------------------------------------------------------
+
+_PY_TO_JSON_TYPE: dict[Any, str] = {
+    str: "string",
+    int: "integer",
+    float: "number",
+    bool: "boolean",
+}
+
+# NoneType
+_NoneType = type(None)
+
+
+def _annotation_to_json_schema(annotation: Any, description: str = "") -> dict[str, Any]:
+    """Convert a Python type annotation to a JSON Schema fragment."""
+    import typing
+
+    origin = getattr(annotation, "__origin__", None)
+    args = getattr(annotation, "__args__", ())
+
+    # Optional[X] → Union[X, None]
+    if origin is typing.Union:
+        non_none = [a for a in args if a is not _NoneType]
+        if len(non_none) == 1:
+            schema = _annotation_to_json_schema(non_none[0], description)
+            if description:
+                schema["description"] = description
+            return schema
+        # true union (rare in our codebase)
+        schema = {"anyOf": [_annotation_to_json_schema(a) for a in non_none]}
+        if description:
+            schema["description"] = description
+        return schema
+
+    # list[X]
+    if origin is list:
+        schema: dict[str, Any] = {"type": "array"}
+        if args:
+            schema["items"] = _annotation_to_json_schema(args[0])
+        if description:
+            schema["description"] = description
+        return schema
+
+    # Primitive
+    json_type = _PY_TO_JSON_TYPE.get(annotation)
+    if json_type:
+        schema = {"type": json_type}
+        if description:
+            schema["description"] = description
+        return schema
+
+    # Fallback
+    schema = {}
+    if description:
+        schema["description"] = description
+    return schema
+
+
+def _build_json_schema(func: Callable) -> dict[str, Any]:
+    """Build a JSON Schema inputSchema dict from a function's signature + docstring."""
+    sig = inspect.signature(func)
+    try:
+        hints = get_type_hints(func)
+    except Exception:
+        hints = {}
+
+    properties: dict[str, Any] = {}
+    required: list[str] = []
+
+    for name, param in sig.parameters.items():
+        annotation = hints.get(name, Any)
+
+        # Extract description from default if it has one (Field-style)
+        description = ""
+        default = param.default
+
+        # Check if default carries a 'description' attr (our simple Field wrapper)
+        if hasattr(default, "description"):
+            description = default.description or ""
+            # Treat this as "no actual default" — required
+            has_default = hasattr(default, "default") and default.default is not _MISSING
+        else:
+            has_default = param.default is not inspect.Parameter.empty
+
+        schema_fragment = _annotation_to_json_schema(annotation, description)
+        properties[name] = schema_fragment
+
+        if not has_default:
+            required.append(name)
+
+    schema: dict[str, Any] = {
+        "type": "object",
+        "properties": properties,
+    }
+    if required:
+        schema["required"] = required
+    return schema
+
+
+_MISSING = object()
+
+
+class _FieldDescriptor:
+    """Lightweight replacement for pydantic.Field — carries description + optional default."""
+
+    def __init__(self, description: str = "", default: Any = _MISSING):
+        self.description = description
+        self.default = default
+
+    def __repr__(self) -> str:
+        return f"Field(description={self.description!r})"
+
+
+def Field(description: str = "", default: Any = _MISSING) -> Any:  # noqa: N802
+    """Simple drop-in for pydantic.Field used as function parameter default."""
+    return _FieldDescriptor(description=description, default=default)
+
+
+# ---------------------------------------------------------------------------
+# Core MCP classes
+# ---------------------------------------------------------------------------
+
+
+class ToolAnnotations:
     """MCP tool annotations."""
 
-    model_config = ConfigDict(populate_by_name=True)
-
-    read_only_hint: bool = True
-    destructive_hint: bool = False
-    open_world_hint: bool = False
+    def __init__(
+        self,
+        read_only_hint: bool = True,
+        destructive_hint: bool = False,
+        open_world_hint: bool = False,
+    ):
+        self.read_only_hint = read_only_hint
+        self.destructive_hint = destructive_hint
+        self.open_world_hint = open_world_hint
 
     def to_mcp_dict(self) -> dict[str, bool]:
         return {
@@ -77,7 +205,6 @@ class Tool:
         name: str,
         description: str,
         input_schema: dict[str, Any],
-        args_model: type[BaseModel],
         handler: Callable[..., Coroutine[Any, Any, Any]],
         annotations: ToolAnnotations,
         title: str | None = None,
@@ -85,8 +212,6 @@ class Tool:
         self.name = name
         self.description = description
         self.input_schema = input_schema
-        self.inputSchema = input_schema
-        self.args_model = args_model
         self.handler = handler
         self.annotations = annotations
         self.title = title
@@ -116,6 +241,52 @@ class TransportSecuritySettings:
         self.allowed_origins = allowed_origins or ["*"]
 
 
+def _serialize_result(raw_result: Any) -> str:
+    """Serialize a tool result to a JSON string."""
+    if hasattr(raw_result, "model_dump_json"):
+        return raw_result.model_dump_json(indent=2)
+    if hasattr(raw_result, "to_dict"):
+        return json.dumps(raw_result.to_dict(), indent=2, ensure_ascii=False)
+    if isinstance(raw_result, (dict, list)):
+        return json.dumps(raw_result, indent=2, ensure_ascii=False)
+    return str(raw_result)
+
+
+def _coerce_arg(value: Any, annotation: Any) -> Any:
+    """Best-effort coercion for a single argument value to match expected type."""
+    import typing
+
+    origin = getattr(annotation, "__origin__", None)
+    args = getattr(annotation, "__args__", ())
+
+    # Optional[X]
+    if origin is typing.Union:
+        non_none = [a for a in args if a is not _NoneType]
+        if value is None:
+            return None
+        if len(non_none) == 1:
+            return _coerce_arg(value, non_none[0])
+        return value
+
+    if annotation is int or annotation == int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return value
+    if annotation is float or annotation == float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return value
+    if annotation is str or annotation == str:
+        return str(value) if value is not None else value
+    if annotation is bool or annotation == bool:
+        if isinstance(value, str):
+            return value.lower() not in ("false", "0", "no", "")
+        return bool(value)
+    return value
+
+
 class MCPServer:
     """Model Context Protocol server with Streamable HTTP transport."""
 
@@ -139,36 +310,12 @@ class MCPServer:
             tool_name = name or func.__name__
             tool_desc = (description or func.__doc__ or "").strip()
             tool_annotations = annotations or ToolAnnotations()
-
-            # Build JSON schema and Pydantic validation model from function signature
-            sig = inspect.signature(func)
-            fields: dict[str, Any] = {}
-            for param_name, param in sig.parameters.items():
-                annotation = (
-                    param.annotation
-                    if param.annotation is not inspect.Parameter.empty
-                    else Any
-                )
-                default = (
-                    param.default
-                    if param.default is not inspect.Parameter.empty
-                    else ...
-                )
-                fields[param_name] = (annotation, default)
-
-            ArgsModel = create_model(
-                f"{tool_name}_arguments",
-                __config__=ConfigDict(coerce_numbers_to_str=True),
-                **fields,
-            )
-            schema = ArgsModel.model_json_schema()
-            schema.pop("title", None)
+            input_schema = _build_json_schema(func)
 
             registered_tool = Tool(
                 name=tool_name,
                 description=tool_desc,
-                input_schema=schema,
-                args_model=ArgsModel,
+                input_schema=input_schema,
                 handler=func,
                 annotations=tool_annotations,
                 title=title,
@@ -196,12 +343,12 @@ class MCPServer:
     async def call_tool(
         self, name: str, arguments: dict[str, Any] | None = None
     ) -> Any:
-        """Call a registered tool directly."""
+        """Call a registered tool directly (for tests)."""
         if name not in self.tools:
             raise KeyError(f"Tool '{name}' not found")
         tool = self.tools[name]
-        validated = tool.args_model(**(arguments or {}))
-        return await tool.handler(**validated.model_dump())
+        coerced = _coerce_tool_args(tool.handler, arguments or {})
+        return await tool.handler(**coerced)
 
     async def _handle_jsonrpc_request(
         self, req: dict[str, Any]
@@ -212,7 +359,6 @@ class MCPServer:
         method = req.get("method")
         params = req.get("params", {}) or {}
 
-        # Notification check (no id means client does not expect response)
         is_notification = req_id is None
 
         if method == "initialize":
@@ -258,18 +404,9 @@ class MCPServer:
 
             tool = self.tools[tool_name]
             try:
-                validated_args = tool.args_model(**tool_args)
-                raw_result = await tool.handler(**validated_args.model_dump())
-
-                if isinstance(raw_result, BaseModel):
-                    text_content = raw_result.model_dump_json(indent=2)
-                elif isinstance(raw_result, (dict, list)):
-                    text_content = json.dumps(
-                        raw_result, indent=2, ensure_ascii=False
-                    )
-                else:
-                    text_content = str(raw_result)
-
+                coerced_args = _coerce_tool_args(tool.handler, tool_args)
+                raw_result = await tool.handler(**coerced_args)
+                text_content = _serialize_result(raw_result)
                 result = {
                     "content": [{"type": "text", "text": text_content}],
                     "isError": False,
@@ -308,7 +445,6 @@ class MCPServer:
         """Create Starlette ASGI application with Streamable HTTP and CORS."""
 
         async def mcp_endpoint(request: Request) -> Response:
-            # Handle CORS preflight
             if request.method == "OPTIONS":
                 return Response(
                     status_code=204,
@@ -395,7 +531,6 @@ class MCPServer:
                         headers=cors_headers,
                     )
 
-                # Format response as SSE event stream if client requested text/event-stream
                 if "text/event-stream" in accept_header:
                     sse_message = (
                         f"event: message\ndata: {json.dumps(resp_data, separators=(',', ':'), ensure_ascii=False)}\n\n"
@@ -417,22 +552,56 @@ class MCPServer:
                 methods=["GET", "POST", "OPTIONS"],
             )
         ]
-        # Include custom routes registered on the server instance
         routes.extend(self._custom_routes)
 
         return Starlette(routes=routes)
 
 
 # ---------------------------------------------------------------------------
-# Server instance initialization
+# Argument coercion helper (replaces pydantic model validation)
 # ---------------------------------------------------------------------------
+
+def _coerce_tool_args(func: Callable, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Coerce tool call arguments to match function signature types."""
+    sig = inspect.signature(func)
+    try:
+        hints = get_type_hints(func)
+    except Exception:
+        hints = {}
+
+    result: dict[str, Any] = {}
+    for param_name, param in sig.parameters.items():
+        annotation = hints.get(param_name)
+
+        if param_name in arguments:
+            value = arguments[param_name]
+            if annotation is not None:
+                value = _coerce_arg(value, annotation)
+            result[param_name] = value
+        elif param.default is not inspect.Parameter.empty:
+            default = param.default
+            # Unwrap our Field descriptor
+            if isinstance(default, _FieldDescriptor):
+                if default.default is not _MISSING:
+                    result[param_name] = default.default
+                # else: required param not provided — skip, let Python raise
+            else:
+                result[param_name] = default
+        # else: required param missing — will raise TypeError on call
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Server instance
+# ---------------------------------------------------------------------------
+
 mcp = MCPServer(
     name="myiis",
     instructions=SERVER_INSTRUCTIONS,
     version="0.1.0",
 )
 
-# Shared service
 _service = ScheduleService()
 
 
@@ -641,7 +810,7 @@ async def get_current_week() -> CurrentWeekResponse:
         )
 
 
-# Custom Health Check and Discovery Routes
+# Custom routes
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
     """Production health check endpoint."""
@@ -684,7 +853,7 @@ async def root_info(request: Request) -> JSONResponse:
     )
 
 
-# Configure Streamable HTTP app
+# Build the Starlette app
 security_settings = TransportSecuritySettings(
     enable_dns_rebinding_protection=False,
     allowed_hosts=["*"],

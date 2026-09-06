@@ -15,7 +15,6 @@ authors = [
 dependencies = [
     "starlette>=0.45.0",
     "httpx>=0.28.0",
-    "pydantic==2.10.5",
 ]
 
 [dependency-groups]

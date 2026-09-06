@@ -1,90 +1,153 @@
-"""Normalized data models returned by MyIIS MCP tools."""
+"""Normalized data models returned by MyIIS MCP tools.
 
-from pydantic import BaseModel, Field
+Uses stdlib dataclasses (no pydantic) for Pyodide/Cloudflare Workers compatibility.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
 
 
-class NormalizedLesson(BaseModel):
+def _to_dict(obj: Any) -> Any:
+    """Recursively convert dataclasses to plain dicts for JSON serialization."""
+    if hasattr(obj, "__dataclass_fields__"):
+        return {k: _to_dict(v) for k, v in obj.__dict__.items()}
+    if isinstance(obj, list):
+        return [_to_dict(i) for i in obj]
+    return obj
+
+
+@dataclass
+class NormalizedLesson:
     """Normalized representation of a single class / lesson."""
 
-    subject: str = Field(description="Краткое название предмета (например, 'ЭМП')")
-    subject_full_name: str | None = Field(default=None, description="Полное название предмета")
-    lesson_type: str = Field(description="Тип занятия: ЛК (лекция), ПЗ (практика), ЛР (лабораторная) и т.д.")
-    start_time: str = Field(description="Время начала в формате ЧЧ:ММ (например, '08:30')")
-    end_time: str = Field(description="Время окончания в формате ЧЧ:ММ (например, '09:55')")
-    date: str | None = Field(default=None, description="Конкретная дата занятия в формате ГГГГ-ММ-ДД")
-    day_of_week: str = Field(description="День недели на русском ('Понедельник', 'Вторник'...)")
-    week_numbers: list[int] = Field(default_factory=list, description="Номера учебных недель (1-4), когда проводится занятие")
-    subgroup: int = Field(default=0, description="Номер подгруппы (0 - вся группа, 1 - 1-я подгруппа, 2 - 2-я подгруппа)")
-    auditories: list[str] = Field(default_factory=list, description="Список аудиторий (например, ['112-3 к.'])")
-    building: str | None = Field(default=None, description="Номер учебного корпуса")
-    teachers: list[str] = Field(default_factory=list, description="Преподаватели занятия (ФИО)")
-    groups: list[str] = Field(default_factory=list, description="Учебные группы на занятии")
-    note: str | None = Field(default=None, description="Примечание к занятию")
+    subject: str
+    lesson_type: str
+    start_time: str
+    end_time: str
+    day_of_week: str
+    subject_full_name: str | None = None
+    date: str | None = None
+    week_numbers: list[int] = field(default_factory=list)
+    subgroup: int = 0
+    auditories: list[str] = field(default_factory=list)
+    building: str | None = None
+    teachers: list[str] = field(default_factory=list)
+    groups: list[str] = field(default_factory=list)
+    note: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
 
 
-class DaySchedule(BaseModel):
+@dataclass
+class DaySchedule:
     """Schedule for a single day."""
 
-    date: str | None = Field(default=None, description="Дата в формате ГГГГ-ММ-ДД")
-    day_of_week: str = Field(description="Название дня недели ('Понедельник', 'Вторник'...)")
-    week_number: int | None = Field(default=None, description="Номер учебной недели (1-4)")
-    lessons: list[NormalizedLesson] = Field(default_factory=list, description="Список занятий в этот день")
+    day_of_week: str
+    date: str | None = None
+    week_number: int | None = None
+    lessons: list[NormalizedLesson] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
 
 
-class ScheduleResult(BaseModel):
+@dataclass
+class ScheduleResult:
     """Comprehensive schedule result for a group or teacher."""
 
-    target: str = Field(description="Название группы или ФИО преподавателя")
-    target_type: str = Field(description="Тип субъекта: 'group' или 'teacher'")
-    current_week: int = Field(description="Текущая учебная неделя БГУИР (1-4)")
-    query_date: str | None = Field(default=None, description="Запрошенная дата (если был фильтр по дате)")
-    days: list[DaySchedule] = Field(default_factory=list, description="Расписание по дням")
-    total_lessons: int = Field(default=0, description="Общее количество найденных занятий")
-    summary: str = Field(description="Краткая текстовая сводка расписания для удобства LLM")
+    target: str
+    target_type: str
+    current_week: int
+    summary: str
+    query_date: str | None = None
+    days: list[DaySchedule] = field(default_factory=list)
+    total_lessons: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
+
+    def model_dump_json(self, indent: int = 2) -> str:
+        import json
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
 
 
-class GroupSearchItem(BaseModel):
+@dataclass
+class GroupSearchItem:
     """Found student group item."""
 
-    name: str = Field(description="Номер группы (например, '310101')")
-    course: int | None = Field(default=None, description="Курс (1-5)")
-    faculty: str | None = Field(default=None, description="Аббревиатура факультета (например, 'ФКП')")
-    speciality: str | None = Field(default=None, description="Специальность")
+    name: str
+    course: int | None = None
+    faculty: str | None = None
+    speciality: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
 
 
-class GroupSearchResponse(BaseModel):
+@dataclass
+class GroupSearchResponse:
     """Result of searching student groups."""
 
-    query: str = Field(description="Поисковый запрос")
-    count: int = Field(description="Количество найденных групп")
-    groups: list[GroupSearchItem] = Field(default_factory=list, description="Список найденных групп")
-    summary: str = Field(description="Краткое описание результатов поиска")
+    query: str
+    count: int
+    summary: str
+    groups: list[GroupSearchItem] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
+
+    def model_dump_json(self, indent: int = 2) -> str:
+        import json
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
 
 
-class TeacherSearchItem(BaseModel):
+@dataclass
+class TeacherSearchItem:
     """Found teacher item."""
 
-    fio: str = Field(description="ФИО преподавателя")
-    url_id: str = Field(description="Уникальный идентификатор преподавателя для API (urlId)")
-    departments: list[str] = Field(default_factory=list, description="Кафедры преподавателя")
-    degree: str | None = Field(default=None, description="Ученая степень")
-    rank: str | None = Field(default=None, description="Ученое звание")
-    photo_link: str | None = Field(default=None, description="Ссылка на фото")
+    fio: str
+    url_id: str
+    departments: list[str] = field(default_factory=list)
+    degree: str | None = None
+    rank: str | None = None
+    photo_link: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
 
 
-class TeacherSearchResponse(BaseModel):
+@dataclass
+class TeacherSearchResponse:
     """Result of searching teachers."""
 
-    query: str = Field(description="Поисковый запрос")
-    count: int = Field(description="Количество найденных преподавателей")
-    teachers: list[TeacherSearchItem] = Field(default_factory=list, description="Список найденных преподавателей")
-    summary: str = Field(description="Краткое описание результатов поиска")
+    query: str
+    count: int
+    summary: str
+    teachers: list[TeacherSearchItem] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
+
+    def model_dump_json(self, indent: int = 2) -> str:
+        import json
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)
 
 
-class CurrentWeekResponse(BaseModel):
-    """Information about current instructional week and semester dates."""
+@dataclass
+class CurrentWeekResponse:
+    """Information about current instructional week."""
 
-    current_week: int = Field(description="Текущая учебная неделя (1, 2, 3 или 4)")
-    today: str = Field(description="Сегодняшняя дата в формате ГГГГ-ММ-ДД")
-    day_of_week: str = Field(description="Текущий день недели на русском")
-    summary: str = Field(description="Краткое текстовое пояснение")
+    current_week: int
+    today: str
+    day_of_week: str
+    summary: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_dict(self)
+
+    def model_dump_json(self, indent: int = 2) -> str:
+        import json
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=indent)

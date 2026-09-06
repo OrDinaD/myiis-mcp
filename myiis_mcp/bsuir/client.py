@@ -101,7 +101,7 @@ class BSUIRClient:
                 status_code=response.status_code,
             )
         data = response.json()
-        groups = [StudentGroup.model_validate(item) for item in data]
+        groups = [StudentGroup.from_dict(item) for item in data if isinstance(item, dict)]
         self._groups_cache = groups
         self._groups_cache_time = now
         return groups
@@ -119,7 +119,7 @@ class BSUIRClient:
                 status_code=response.status_code,
             )
         data = response.json()
-        employees = [Employee.model_validate(item) for item in data]
+        employees = [Employee.from_dict(item) for item in data if isinstance(item, dict)]
         self._employees_cache = employees
         self._employees_cache_time = now
         return employees
@@ -136,7 +136,7 @@ class BSUIRClient:
                 status_code=response.status_code,
             )
         data = response.json()
-        return BSUIRScheduleResponse.model_validate(data)
+        return BSUIRScheduleResponse.from_dict(data)
 
     async def get_employee_schedule(self, url_id: str) -> BSUIRScheduleResponse:
         """Fetch schedule for a specific employee by their urlId."""
@@ -150,7 +150,7 @@ class BSUIRClient:
                 status_code=response.status_code,
             )
         data = response.json()
-        return BSUIRScheduleResponse.model_validate(data)
+        return BSUIRScheduleResponse.from_dict(data)
 
     async def find_groups(
         self,
