@@ -144,3 +144,52 @@ async def test_schedule_service_teacher_details():
     assert "https://libeldoc.bsuir.by" in profile.repository_url
     assert "https://iis.bsuir.by/employees/iu-german" == profile.profile_url
 
+
+@pytest.mark.asyncio
+async def test_schedule_service_multiple_teachers_surname_aggregation():
+    from myiis_mcp.bsuir.models import EmployeeDetails, JobPosition, EmployeeContact
+
+    details_yu = EmployeeDetails(
+        id=506004,
+        first_name="Юлия",
+        middle_name="Олеговна",
+        last_name="Герман",
+        rank="доцент",
+        email="jgerman@bsuir.by",
+        url_id="iu-german",
+        job_positions=[JobPosition(job_position="доцент", department="Каф.ИТАС", contacts=[EmployeeContact(auditory="605а", building_number="5 к.")])],
+        reading_courses=["Мобильные приложения"],
+    )
+    details_ov = EmployeeDetails(
+        id=500331,
+        first_name="Олег",
+        middle_name="Витольдович",
+        last_name="Герман",
+        rank="доцент",
+        email="german@bsuir.by",
+        url_id="o-german",
+        job_positions=[JobPosition(job_position="доцент", department="Каф.ИТАС", contacts=[EmployeeContact(auditory="605-5", building_number="5 к.")])],
+        reading_courses=["Интеллектуальные системы"],
+    )
+
+    class MockBSUIRClient:
+        async def find_employees(self, query):
+            return [
+                Employee(first_name="Юлия", middle_name="Олеговна", last_name="Герман", url_id="iu-german"),
+                Employee(first_name="Олег", middle_name="Витольдович", last_name="Герман", url_id="o-german"),
+            ]
+
+        async def get_employee_details(self, url_id):
+            if url_id == "iu-german":
+                return details_yu
+            return details_ov
+
+    service = ScheduleService(client=MockBSUIRClient())
+    profile = await service.get_teacher_details("Герман")
+    assert "jgerman@bsuir.by" in profile.email
+    assert "german@bsuir.by" in profile.email
+    assert "Юлия" in profile.fio and "Олег" in profile.fio
+    assert "Мобильные приложения" in profile.reading_courses
+    assert "Интеллектуальные системы" in profile.reading_courses
+    assert len(profile.contacts) == 2
+

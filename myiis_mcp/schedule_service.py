@@ -408,12 +408,91 @@ class ScheduleService:
                 exact = [m for m in matches if m.last_name and m.last_name.lower() == clean_t.lower()]
                 if len(exact) == 1:
                     matched_emp = exact[0]
+                    url_id = matched_emp.url_id or clean_t
+                elif 1 < len(exact) <= 3:
+                    # Multiple teachers share the exact surname (e.g. 'Герман')!
+                    # Fetch details for all of them and return a comprehensive response
+                    all_details = []
+                    for e in exact:
+                        if e.url_id:
+                            try:
+                                all_details.append(await self.client.get_employee_details(e.url_id))
+                            except Exception:
+                                pass
+
+                    if all_details:
+                        summaries = []
+                        all_courses: list[str] = []
+                        all_contacts: list[TeacherDepartmentContact] = []
+                        all_emails: list[str] = []
+                        departments_set: list[str] = []
+
+                        for d in all_details:
+                            if d.email and d.email not in all_emails:
+                                all_emails.append(d.email)
+                            for c in d.reading_courses:
+                                if c not in all_courses:
+                                    all_courses.append(c)
+
+                            d_contacts_desc = []
+                            for job in d.job_positions:
+                                if job.department and job.department not in departments_set:
+                                    departments_set.append(job.department)
+                                for c in job.contacts:
+                                    tc = TeacherDepartmentContact(
+                                        department=c.department or job.department,
+                                        job_position=job.job_position,
+                                        phone=c.phone_number,
+                                        auditory=c.auditory,
+                                        building=c.building_number,
+                                        address=c.address,
+                                    )
+                                    all_contacts.append(tc)
+                                    aud = f"ауд. {tc.auditory}" if tc.auditory else ""
+                                    bld = f"({tc.building})" if tc.building else ""
+                                    ph = f"тел. {tc.phone}" if tc.phone else ""
+                                    part = " ".join(filter(None, [aud, bld, ph]))
+                                    if part:
+                                        d_contacts_desc.append(part)
+
+                            c_info = f" Кабинет: {'; '.join(d_contacts_desc)}." if d_contacts_desc else ""
+                            courses_info = f" Читает: {', '.join(d.reading_courses[:3])}." if d.reading_courses else ""
+                            email_info = f" Email: {d.email}." if d.email else ""
+                            rank_info = f" ({d.rank})" if d.rank else ""
+                            summaries.append(f"{d.display_name}{rank_info}.{email_info}{c_info}{courses_info}")
+
+                        combined_summary = (
+                            f"По фамилии '{clean_t}' найдено {len(all_details)} преподавателя: "
+                            + " | ".join(summaries)
+                        )
+
+                        first_d = all_details[0]
+                        return TeacherProfileResponse(
+                            fio=" / ".join([d.display_name for d in all_details]),
+                            url_id=first_d.url_id or clean_t,
+                            summary=combined_summary,
+                            first_name=first_d.first_name,
+                            middle_name=first_d.middle_name,
+                            last_name=first_d.last_name,
+                            email="; ".join(all_emails) if all_emails else None,
+                            degree=first_d.degree,
+                            rank=first_d.rank,
+                            photo_url=f"https://iis.bsuir.by/api/v1/employees/photo/{first_d.id}" if first_d.id else None,
+                            profile_url=f"https://iis.bsuir.by/employees/{first_d.url_id}" if first_d.url_id else None,
+                            schedule_url=f"https://iis.bsuir.by/schedule/{first_d.url_id}" if first_d.url_id else None,
+                            repository_url=None,
+                            departments=departments_set,
+                            reading_courses=all_courses,
+                            contacts=all_contacts,
+                            profile_links=[],
+                            additional_info={},
+                        )
                 else:
                     options = ", ".join([f"{m.display_name} ({', '.join(m.academic_department) or m.url_id})" for m in matches[:5]])
                     raise ValueError(f"Найдено несколько преподавателей по запросу '{clean_t}': {options}. Уточните ФИО.")
             else:
                 matched_emp = matches[0]
-            url_id = matched_emp.url_id or clean_t
+                url_id = matched_emp.url_id or clean_t
 
         raw = await self.client.get_employee_details(url_id)
 
