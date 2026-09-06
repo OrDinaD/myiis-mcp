@@ -1,217 +1,204 @@
 # MyIIS MCP Server
 
-[![CI / Tests](https://img.shields.io/badge/tests-14%20passed-brightgreen.svg)]()
-[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)]()
-[![MCP](https://img.shields.io/badge/MCP-2.1%2B-purple.svg)]()
-[![License](https://img.shields.io/badge/license-MIT-green.svg)]()
+<p align="center">
+  <img src="./assets/icon-256.png" alt="MyIIS Logo" width="120" height="120" style="border-radius: 24px;" />
+</p>
 
-> **MyIIS MCP** — официальный Model Context Protocol (MCP) сервер, предоставляющий ChatGPT, Claude, Cursor, Codex и другим LLM-клиентам доступ в реальном времени к расписанию занятий, учебным неделям, группам и преподавателям Белорусского государственного университета информатики и радиоэлектроники ([ИИС БГУИР](https://iis.bsuir.by/api)).
+<p align="center">
+  <strong>Официальный Model Context Protocol (MCP) сервер расписания занятий ИИС БГУИР для ChatGPT, Claude и Cursor.</strong>
+</p>
 
----
-
-## 🏛 Архитектура
-
-MyIIS MCP спроектирован как полностью самостоятельный, ультратонкий и асинхронный адаптер между протоколом **Streamable HTTP MCP** (требуемым OpenAI / ChatGPT Developer Mode) и открытым REST API ИИС БГУИР:
-
-```mermaid
-flowchart LR
-    subgraph Clients["Клиенты"]
-        ChatGPT["ChatGPT / Developer Mode"]
-        Claude["Claude / Cursor / Codex"]
-        Inspector["MCP Inspector"]
-    end
-
-    subgraph Hosting["Runtime / Cloudflare Workers"]
-        Domain["https://myiis.ordinad.xyz/mcp"]
-        Worker["Cloudflare Python Worker (worker.py)"]
-    end
-
-    subgraph Core["MyIIS MCP Core"]
-        MCPServer["MCPServer (Streamable HTTP / ASGI)"]
-        Service["ScheduleService (Date & Week Engine)"]
-        BSUIRClient["BSUIRClient (httpx async)"]
-    end
-
-    subgraph External["Внешние сервисы"]
-        BSUIR["Официальный API ИИС БГУИР (iis.bsuir.by/api/v1)"]
-    end
-
-    ChatGPT --> Domain
-    Claude --> Domain
-    Inspector --> Domain
-    Domain --> Worker
-    Worker --> MCPServer
-    MCPServer --> Service
-    Service --> BSUIRClient
-    BSUIRClient --> BSUIR
-```
-
-### Ключевые принципы архитектуры:
-- **100% Standalone**: сервер полностью автономен, не зависит от сторонних сайтов или портфолио, имеет свой собственный жизненный цикл и репозиторий.
-- **Serverless & Stateless**: сервер не хранит персистентного состояния между запросами, идеально работает в Cloudflare Workers, Vercel Serverless или контейнерах.
-- **Официальный MCP Python SDK 2.x**: полная реализация спецификации Streamable HTTP, `structuredContent`, аннотаций безопасности (`readOnlyHint: true`, `destructiveHint: false`, `openWorldHint: false`) и строгих Pydantic-схем `outputSchema`.
-- **Нормализация данных**: вместо громоздких "сырых" JSON-ответов БГУИР сервер формирует компактные, строгие модели `NormalizedLesson`, оптимизированные для контекста языковой модели и будущего MCP Apps UI.
-- **Интеллектуальный расчет недель**: сервер автоматически вычисляет 4-недельный цикл БГУИР (недели 1, 2, 3, 4) для любой целевой даты («сегодня», «завтра», произвольная дата) на основе текущей учебной недели университета.
+<p align="center">
+  <a href="https://github.com/OrDinaD/myiis-mcp/actions"><img src="https://img.shields.io/badge/tests-14%20passed-brightgreen.svg" alt="Tests" /></a>
+  <a href="https://www.python.org/"><img src="https://img.shields.io/badge/python-3.13-blue.svg" alt="Python 3.13" /></a>
+  <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-2024--11--05-purple.svg" alt="MCP Spec" /></a>
+  <a href="https://workers.cloudflare.com/"><img src="https://img.shields.io/badge/Cloudflare-Python%20Workers-orange.svg" alt="Cloudflare Workers" /></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License" /></a>
+</p>
 
 ---
 
-## 🛠 Доступные MCP Tools
+## 🚀 Быстрый старт: подключение в ChatGPT за 30 секунд
 
-Все инструменты строго `read-only` и не изменяют состояние внешней системы.
+Сервер уже задеплоен и круглосуточно работает в **Cloudflare Workers**. Вам не нужно ничего скачивать или запускать локально.
 
-| Tool | Описание | Основные аргументы |
-|------|----------|-------------------|
-| `get_group_schedule` | Получить расписание учебной группы (на день, диапазон дней или всю неделю) | `group` (номер группы), `date` ('today', 'tomorrow', 'ГГГГ-ММ-ДД'), `days` (1-14), `subgroup` (1 или 2) |
-| `get_teacher_schedule` | Получить расписание занятий преподавателя по фамилии или urlId | `teacher` (фамилия или urlId), `date`, `days` |
-| `search_groups` | Поиск учебных групп по номеру, специальности или факультету | `query` (строка поиска), `course` (1-5), `faculty` (аббревиатура) |
-| `search_teachers` | Поиск преподавателей по фамилии, имени или кафедре | `query` (ФИО), `department` (кафедра) |
-| `get_current_week` | Получить текущую учебную неделю БГУИР (1-4) и сегодняшнюю дату | *без аргументов* |
+### Пошаговая инструкция:
 
-### Структура ответа занятия (`NormalizedLesson`):
-```json
-{
-  "subject": "ЭМП",
-  "subject_full_name": "Эргономика мобильных приложений",
-  "lesson_type": "ЛК",
-  "start_time": "08:30",
-  "end_time": "09:55",
-  "date": "2026-09-07",
-  "day_of_week": "Понедельник",
-  "week_numbers": [1, 3],
-  "subgroup": 0,
-  "auditories": ["112-3 к."],
-  "building": "3",
-  "teachers": ["Василькова А. Н."],
-  "groups": ["310101"],
-  "note": null
-}
-```
+1. Откройте [chatgpt.com](https://chatgpt.com) (требуется подписка Plus, Team или Pro).
+2. Перейдите в **Settings** (Настройки) → **Security and login** → включите тумблер **Developer mode**.
+3. Перейдите по ссылке **[chatgpt.com/plugins](https://chatgpt.com/plugins)** и нажмите кнопку **`+`** (Добавить плагин).
+4. Заполните поля:
+   - **Имя:** `MyIIS`
+   - **Описание:** `Расписание занятий, группы и преподаватели БГУИР через официальный API ИИС.`
+   - **Тип подключения:** выберите **URL**.
+   - **URL сервера:**
+     ```text
+     https://myiis-mcp.vlad-vasilevskiy-07.workers.dev/mcp
+     ```
+5. Нажмите **Подключить** (*Connect*).
+6. В ChatGPT переключите режим диалога на **Work** (Режим работы), введите символ **`@`**, выберите **`MyIIS`** и задайте любой вопрос по расписанию!
 
 ---
 
 ## 💬 Примеры запросов к ChatGPT
 
-После подключения MyIIS MCP в ChatGPT пользователь может обращаться на естественном языке:
+После подключения вы можете общаться с моделью на естественном русском языке:
 
-- *«Какое расписание у группы 310101 на сегодня?»*
-- *«Какие пары завтра у 310101 для 1-й подгруппы?»*
-- *«Покажи расписание занятий преподавателя Васильковой на понедельник»*
-- *«Какая сейчас идет учебная неделя в БГУИР?»*
-- *«Найди группы факультета ФКП по специальности ИСиТ»*
-- *«Кто ведет занятия на кафедре ПОИТ?»*
+- 📅 **Расписание на сегодня / завтра:**
+  > «@MyIIS какое расписание у группы 420-603 на сегодня?»  
+  > «@MyIIS покажи расписание на завтра для 1-й подгруппы группы 310101»
+
+- 🗓 **Расписание на всю неделю:**
+  > «@MyIIS расскажи, какое расписание у группы 420603 на эту неделю?»
+
+- 👨‍🏫 **Расписание преподавателя:**
+  > «@MyIIS покажи расписание занятий преподавателя Васильковой на понедельник»  
+  > «@MyIIS найди преподавателя Марков и покажи его пары на этой неделе»
+
+- 🔍 **Поиск групп и преподавателей:**
+  > «@MyIIS найди группы 4 курса факультета ФКП по специальности ИСиТ»  
+  > «@MyIIS кто преподает на кафедре ПОИТ?»
+
+- ℹ️ **Текущая учебная неделя:**
+  > «@MyIIS какая сейчас учебная неделя в БГУИР?»
 
 ---
 
-## 💻 Локальная установка и запуск
+## 🛠 Доступные MCP Tools
 
-### Требования
-- Python 3.12+
-- `uv` или стандартный `pip`
-- Node.js 18+ (для запуска MCP Inspector)
+Сервер реализует 5 специализированных инструментов (tools) протокола MCP. Все инструменты имеют строгие аннотации безопасности `readOnlyHint: true` (не производят деструктивных действий и изменений данных).
 
-### 1. Клонирование и установка зависимостей
+| Инструмент | Описание | Основные параметры |
+|------------|----------|-------------------|
+| `get_group_schedule` | Получить расписание занятий группы БГУИР на конкретный день, диапазон дней или всю неделю | `group` *(str, обязательный)*: номер группы (например, `'420603'`)<br>`date` *(str, опц.)*: `'today'`, `'tomorrow'` или `'ГГГГ-ММ-ДД'`<br>`days` *(int, опц.)*: кол-во дней (1–14)<br>`subgroup` *(int, опц.)*: номер подгруппы (`1` или `2`) |
+| `get_teacher_schedule` | Получить расписание занятий преподавателя по фамилии, ФИО или urlId | `teacher` *(str, обязательный)*: фамилия или urlId (например, `'Василькова'` или `'a-vasilkova'`)<br>`date` *(str, опц.)*: дата фильтрации<br>`days` *(int, опц.)*: кол-во дней |
+| `search_groups` | Поиск учебных групп по номеру, специальности или факультету | `query` *(str, обязательный)*: поисковый запрос (например, `'310101'` или `'ИСиТ'`)<br>`course` *(int, опц.)*: номер курса (1–5)<br>`faculty` *(str, опц.)*: аббревиатура факультета (`'ФКП'`, `'ФКСиС'`) |
+| `search_teachers` | Поиск преподавателей по фамилии, имени или названию кафедры | `query` *(str, обязательный)*: фамилия или имя преподавателя<br>`department` *(str, опц.)*: название или аббревиатура кафедры |
+| `get_current_week` | Получить текущую учебную неделю университета (1–4) и дату | *Параметры не требуются* |
+
+---
+
+## 📋 Структура и формат ответа
+
+Сервер нормализует "сырые" данные ИИС БГУИР в компактную и строго структурированную модель, оптимизированную для контекстного окна LLM:
+
+```json
+{
+  "target": "Группа 420603",
+  "target_type": "group",
+  "current_week": 2,
+  "summary": "Расписание для Группа 420603 на 2026-09-07: найдено 3 занятия.",
+  "query_date": "2026-09-07",
+  "days": [
+    {
+      "day_of_week": "Понедельник",
+      "date": "2026-09-07",
+      "week_number": 2,
+      "lessons": [
+        {
+          "subject": "СтатМОД",
+          "subject_full_name": "Статистическое моделирование",
+          "lesson_type": "ЛР",
+          "start_time": "17:05",
+          "end_time": "18:30",
+          "day_of_week": "Понедельник",
+          "date": "2026-09-07",
+          "week_numbers": [2, 4],
+          "subgroup": 2,
+          "auditories": ["6016-5 к."],
+          "building": "5",
+          "teachers": ["Иванов И. И."],
+          "groups": ["420603"],
+          "note": null
+        }
+      ]
+    }
+  ],
+  "total_lessons": 3
+}
+```
+
+### Особенности обработки расписания:
+- **4-недельный цикл БГУИР**: сервер автоматически сопоставляет дату и номер учебной недели (1, 2, 3 или 4), отфильтровывая занятия, которых нет на текущей неделе.
+- **Подгруппы**: корректно разделяет общие пары (`subgroup: 0`) и пары по подгруппам (`1` или `2`).
+- **Аудитории и корпуса**: автоматически извлекает номер корпуса из названия аудитории (например, `'104-3 к.'` → корпус `3`).
+
+---
+
+## 🔌 Подключение в другие MCP-клиенты
+
+### Claude Desktop
+Добавьте в ваш `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "myiis": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://myiis-mcp.vlad-vasilevskiy-07.workers.dev/mcp"
+      ]
+    }
+  }
+}
+```
+
+### Cursor IDE
+Создайте файл `.cursor/mcp.json` в вашем проекте:
+```json
+{
+  "mcpServers": {
+    "myiis": {
+      "url": "https://myiis-mcp.vlad-vasilevskiy-07.workers.dev/mcp"
+    }
+  }
+}
+```
+
+---
+
+## 🌐 Публичные эндпоинты
+
+- **MCP Endpoint (Streamable HTTP / SSE):**
+  ```text
+  POST /mcp — JSON-RPC 2.0 (initialize, tools/list, tools/call)
+  GET  /mcp — SSE Handshake (Accept: text/event-stream)
+  ```
+- **Healthcheck & University Status:**
+  ```text
+  GET /health — проверяет статус воркера, доступность API БГУИР и текущую неделю
+  ```
+- **Discovery Root:**
+  ```text
+  GET / — общая информация о сервере, версия и доступные роуты
+  ```
+
+---
+
+## 💻 Локальная разработка и тестирование
+
 ```bash
+# Клонирование репозитория
 git clone https://github.com/OrDinaD/myiis-mcp.git
 cd myiis-mcp
 
-# Создание виртуального окружения и установка
-uv venv .venv
+# Создание виртуального окружения и установка зависимостей
+uv venv
 source .venv/bin/activate
 uv pip install -e ".[dev]"
-```
 
-### 2. Запуск тестов
-```bash
-pytest
-```
+# Запуск тестов (14 тестов: парсинг, расчет недель, MCP handshake)
+uv run pytest
 
-### 3. Локальный запуск сервера
-```bash
-uvicorn myiis_mcp.server:app --host 127.0.0.1 --port 8000 --reload
-```
-
-После запуска доступны эндпоинты:
-- Healthcheck: `http://127.0.0.1:8000/health`
-- Server Discovery: `http://127.0.0.1:8000/`
-- Streamable HTTP MCP Endpoint: `http://127.0.0.1:8000/mcp`
-
-### 4. Тестирование через официальный MCP Inspector
-Запустите интерактивный интерфейс MCP Inspector:
-```bash
-npx @modelcontextprotocol/inspector
-```
-В открывшемся браузере выберите transport: **Streamable HTTP**, URL: `http://127.0.0.1:8000/mcp`.
-
-Либо через CLI с проверкой соответствия спецификации (`--strict`):
-```bash
-npx @modelcontextprotocol/inspector --cli --transport http --server-url http://127.0.0.1:8000/mcp --method tools/list --strict
+# Локальный запуск dev-сервера через Cloudflare Pyodide runtime
+uv run pywrangler dev --port 8787
 ```
 
 ---
 
-## 🚀 Хостинг на Cloudflare Workers
+## 📄 Лицензия и авторство
 
-Репозиторий готов для развертывания в **Cloudflare Python Workers** (Pyodide WebAssembly runtime):
-
-- Настроен `wrangler.toml` с `compatibility_flags = ["python_workers", "python_dedicated_snapshot"]`.
-- Все зависимости (`starlette`, `httpx`, `pydantic`) вендорятся через `pywrangler sync` в `python_modules/` и полностью совместимы с Pyodide.
-- Точка входа `worker.py` использует нативный ASGI-мост Cloudflare (`workers.asgi`).
-
-### Деплой через Wrangler CLI:
-```bash
-# Локальная синхронизация пакетов и запуск dev-сервера
-uv run pywrangler dev
-
-# Деплой в Cloudflare
-uv run pywrangler deploy
-# или стандартный:
-npx wrangler deploy
-```
-
-### Автоматический деплой через GitHub в Cloudflare Dashboard:
-1. В панели управления **Cloudflare Dashboard** перейдите в **Workers & Pages** → выберите проект `myiis-mcp`.
-2. Настройки сборки (Build & Deploy Settings):
-   - **Root directory**: `/`
-   - **Build command**: `None` (или `npm run build`)
-   - **Deploy command**: `npx wrangler deploy` (или `npm run deploy`)
-3. Каждый push в ветку `main` автоматически деплоит сервер на `*.workers.dev` (или привязанный кастомный домен).
-
----
-
-## 🤖 Подключение в ChatGPT Developer Mode
-
-1. Откройте ChatGPT (с активной подпиской Plus / Team / Pro).
-2. Перейдите в **Settings** → **Security and login** → включите **Developer mode**.
-3. Откройте [chatgpt.com/plugins](https://chatgpt.com/plugins) или меню плагинов.
-4. Нажмите **Add an MCP server** (+).
-5. Задайте имя: `MyIIS`.
-6. В поле **Server URL** укажите адрес вашего сервера:
-   ```text
-   https://myiis.ordinad.xyz/mcp
-   ```
-7. ChatGPT подключится по протоколу Streamable HTTP, считает манифест инструментов (`tools/list`) и сделает расписание доступным в чате.
-
----
-
-## 🔮 Phase 2 — MCP Apps UI (Interactive Schedule Widget)
-
-В соответствии со спецификацией **OpenAI Apps SDK** и **MCP Apps** (`@modelcontextprotocol/ext-apps`):
-- Следующим этапом запланировано внедрение интерактивного виджета расписания (Schedule Widget), который будет визуализироваться прямо в окне диалога ChatGPT в виде карточки расписания (календарь, сетка пар, переключение учебных недель 1-4, подсветка аудиторий и текущего занятия).
-- Архитектура `myiis_mcp` уже полностью подготовлена:
-  - Все инструменты возвращают строго типизированный `structuredContent`.
-  - В `_meta` инструментов будет прикреплен ресурс `ui://widget/schedule.html`.
-  - Виджет будет использовать двусторонний мост `window.openai` для адаптации темы и пользовательских фильтров.
-
----
-
-## 🔮 Phase 3 — Сохранение группы и персонализация
-
-- Использование ChatGPT Memory для автоматического запоминания номера группы студента.
-- Опциональная авторизация (OAuth) для доступа к оценкам, рейтингу и ведомостям из личного кабинета ИИС БГУИР.
-
----
-
-## 📄 Источник данных и лицензия
-
-- Данные предоставляются открытым API Интегрированной Информационной Системы БГУИР: [iis.bsuir.by/api](https://iis.bsuir.by/api).
-- Код проекта распространяется под лицензией **MIT**. Автор: [Vladislav Vasilevskiy](https://github.com/OrDinaD).
+- **Лицензия:** [MIT License](./LICENSE). Свободно для использования, модификации и распространения.
+- **Автор:** [Vladislav Vasilevskiy](https://github.com/OrDinaD).
+- **Источник данных:** открытый API Интегрированной Информационной Системы БГУИР — [iis.bsuir.by/api](https://iis.bsuir.by/api).
