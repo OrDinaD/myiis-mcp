@@ -1,6 +1,7 @@
 """Data models for raw and intermediate BSUIR IIS API representations."""
 
-from pydantic import BaseModel, Field, ConfigDict
+from typing import Any
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 
 
 class StudentGroup(BaseModel):
@@ -39,6 +40,15 @@ class Employee(BaseModel):
     academic_department: list[str] = Field(default_factory=list, alias="academicDepartment")
     email: str | None = None
 
+    @field_validator("academic_department", mode="before")
+    @classmethod
+    def _coerce_departments(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return [str(item) for item in v if item]
+        return [str(v)]
+
     @property
     def display_name(self) -> str:
         """Returns best display name (fio or full name)."""
@@ -70,6 +80,13 @@ class BSUIRLesson(BaseModel):
     employees: list[Employee] = Field(default_factory=list)
     student_groups: list[dict] = Field(default_factory=list, alias="studentGroups")
 
+    @field_validator("auditories", "week_number", "employees", "student_groups", mode="before")
+    @classmethod
+    def _coerce_empty_lists(cls, v: Any) -> list:
+        if v is None:
+            return []
+        return v
+
 
 class BSUIRScheduleResponse(BaseModel):
     """Raw response from /api/v1/schedule or /api/v1/employees/schedule."""
@@ -88,4 +105,25 @@ class BSUIRScheduleResponse(BaseModel):
     current_term: str | None = Field(default=None, alias="currentTerm")
     next_term: str | None = Field(default=None, alias="nextTerm")
     current_period: int | str | None = Field(default=None, alias="currentPeriod")
-    is_zaoch_or_dist: bool = Field(default=False, alias="isZaochOrDist")
+    is_zaoch_or_dist: bool | None = Field(default=False, alias="isZaochOrDist")
+
+    @field_validator("schedules", mode="before")
+    @classmethod
+    def _coerce_schedules(cls, v: Any) -> dict:
+        if v is None:
+            return {}
+        return v
+
+    @field_validator("exams", mode="before")
+    @classmethod
+    def _coerce_exams(cls, v: Any) -> list:
+        if v is None:
+            return []
+        return v
+
+    @field_validator("is_zaoch_or_dist", mode="before")
+    @classmethod
+    def _coerce_bool(cls, v: Any) -> bool:
+        if v is None:
+            return False
+        return bool(v)
