@@ -45,3 +45,5 @@ htmlcov/
 # Local integration scratch directories
 .portfolio_site_repo/
 scratch/
+*.db
+*.sqlite*

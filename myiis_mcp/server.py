@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import os
 import time
 import uuid
 from datetime import datetime, timezone
@@ -34,6 +35,20 @@ def _record_log(entry: dict[str, Any]) -> None:
         _SERVER_LOGS.pop(0)
 
 
+from .account.routes import AccountRoutes
+from .auth.crypto import decrypt_secret, encrypt_secret
+from .auth.models import (
+    AuthenticationRequired,
+    InsufficientScope,
+    ReconnectRequired,
+    ServiceNotLinked,
+    UpstreamAuthenticationFailed,
+    UpstreamUnavailable,
+    User,
+)
+from .auth.oauth import SERVER_BASE_URL, OAuthServer
+from .auth.session import UpstreamSessionManager
+from .auth.storage import StorageRepository
 from .bsuir.client import BSUIRClient
 from .bsuir.exceptions import (
     BSUIRApiError,
@@ -50,26 +65,45 @@ from .models import (
     TeacherSearchResponse,
 )
 from .schedule_service import ScheduleService
+from .security.redaction import redact_dict, redact_string
+from .tools.account import create_account_tool
+from .tools.iis import create_iis_tools
+from .tools.lms import create_lms_tools
 
 SERVER_INSTRUCTIONS = """
-Сервер MyIIS MCP предоставляет актуальные данные о расписании занятий, учебных неделях, группах и преподавателях
-Белорусского государственного университета информатики и радиоэлектроники (БГУИР / BSUIR) через официальный API ИИС БГУИР.
+Сервер MyIIS MCP предоставляет доступ к учебным сервисам Белорусского государственного
+университета информатики и радиоэлектроники (БГУИР / BSUIR) для ChatGPT, Claude и MCP-клиентов.
 
-Основные возможности:
-1. get_group_schedule: получение расписания группы (на сегодня, завтра, конкретную дату или всю неделю).
-2. get_teacher_schedule: получение расписания преподавателя по фамилии или urlId (где найти преподавателя, аудитории занятий и контакты кафедры).
-3. get_teacher_profile: получение контактов преподавателя (email, телефон кафедры, кабинет/аудитория, читаемые курсы/дисциплины, ссылки на профиль и репозиторий публикаций БГУИР).
-4. search_groups: поиск учебной группы по номеру или специальности.
-5. search_teachers: поиск преподавателя по фамилии, имени или кафедре.
-6. get_current_week: получение номера текущей учебной недели (1-4) и сегодняшней даты.
+1. Публичные сервисы (не требуют авторизации):
+- get_group_schedule: расписание группы (на сегодня, завтра, дату или неделю).
+- get_teacher_schedule: расписание преподавателя по фамилии или urlId (аудитории, пары).
+- get_teacher_profile: контакты преподавателя (email, телефон, кафедра, курсы, ссылки).
+- search_groups: поиск группы по номеру или специальности.
+- search_teachers: поиск преподавателя по фамилии, имени или кафедре.
+- get_current_week: текущая учебная неделя (1-4) и дата.
+- render_schedule_widget: интерактивный виджет расписания для ChatGPT.
 
-Правила работы:
-- В БГУИР действует 4-недельный учебный цикл (недели 1, 2, 3, 4).
-- Если пользователь спрашивает расписание на 'сегодня' или 'завтра', передавайте в date значение 'today' или 'tomorrow'.
-- Даты также можно передавать в формате 'ГГГГ-ММ-ДД' (например, '2026-09-07').
-- Чтобы узнать контакты преподавателя (email, телефон, аудиторию кафедры, читаемые предметы), используйте get_teacher_profile.
-- Чтобы узнать, где найти преподавателя в определенный день (аудитории пар, группы), используйте get_teacher_schedule.
-- Если фамилия преподавателя введена с возможной опечаткой (например, 'лапо' вместо 'Лаппо'), сервер автоматически подберет наиболее подходящего сотрудника.
+2. Персональные данные студента ИИС БГУИР (iis.bsuir.by, защищено OAuth 2.1):
+- iis_get_profile: профиль студента (ФИО, группа, факультет, специальность, рейтинг).
+- iis_get_markbook: электронная зачётная книжка (оценки по семестрам, средний балл).
+- iis_get_grade_book: текущий журнал отметок за семестр.
+- iis_get_omissions: статистика пропусков занятий (общие часы, уважительные/неуважительные).
+- iis_get_mark_sheets: экзаменационные ведомости, пересдачи и направления.
+- iis_get_certificates: заказанные справки об обучении и их статус.
+- iis_get_library_books: книги из библиотеки БГУИР и сроки сдачи.
+- iis_get_dormitory_info: очередь на общежитие, статус, взыскания/поощрения.
+- iis_get_group_info: куратор, староста и одногруппники.
+- iis_get_notifications: уведомления из ИИС БГУИР.
+
+3. Персональные материалы СЭО Moodle (lms.bsuir.by, защищено OAuth 2.1):
+- lms_get_courses: список учебных курсов студента.
+- lms_get_course: структура курса (темы, разделы, модули, задания, лекции).
+- lms_get_page: чтение текста лекции или страницы (mod/page).
+- lms_get_resource: безопасное скачивание файлов курса.
+
+4. Управление аккаунтом:
+- get_account_status: проверка статуса привязки аккаунтов ИИС и СЭО Moodle.
+- Личный кабинет: https://myiis-mcp.vlad-vasilevskiy-07.workers.dev/account
 """.strip()
 
 
@@ -145,6 +179,9 @@ def _build_json_schema(func: Callable) -> dict[str, Any]:
     required: list[str] = []
 
     for name, param in sig.parameters.items():
+        if name == "user":
+            continue
+
         annotation = hints.get(name, Any)
 
         # Extract description from default if it has one (Field-style)
@@ -355,6 +392,33 @@ class MCPServer:
         self.resources: dict[str, Resource] = {}
         self._custom_routes: list[Route] = []
 
+    def register_tool(
+        self,
+        func: Callable[..., Coroutine[Any, Any, Any]],
+        name: str | None = None,
+        title: str | None = None,
+        description: str | None = None,
+        annotations: ToolAnnotations | None = None,
+        meta: dict[str, Any] | None = None,
+    ) -> Tool:
+        """Register an async function as an MCP tool."""
+        tool_name = name or func.__name__
+        tool_desc = (description or func.__doc__ or "").strip()
+        tool_annotations = annotations or ToolAnnotations()
+        input_schema = _build_json_schema(func)
+
+        registered_tool = Tool(
+            name=tool_name,
+            description=tool_desc,
+            input_schema=input_schema,
+            handler=func,
+            annotations=tool_annotations,
+            title=title,
+            meta=meta,
+        )
+        self.tools[tool_name] = registered_tool
+        return registered_tool
+
     def tool(
         self,
         name: str | None = None,
@@ -366,21 +430,14 @@ class MCPServer:
         """Decorator to register an async function as an MCP tool."""
 
         def decorator(func: Callable[..., Coroutine[Any, Any, Any]]):
-            tool_name = name or func.__name__
-            tool_desc = (description or func.__doc__ or "").strip()
-            tool_annotations = annotations or ToolAnnotations()
-            input_schema = _build_json_schema(func)
-
-            registered_tool = Tool(
-                name=tool_name,
-                description=tool_desc,
-                input_schema=input_schema,
-                handler=func,
-                annotations=tool_annotations,
+            self.register_tool(
+                func,
+                name=name,
                 title=title,
+                description=description,
+                annotations=annotations,
                 meta=meta,
             )
-            self.tools[tool_name] = registered_tool
             return func
 
         return decorator
@@ -422,17 +479,20 @@ class MCPServer:
         return list(self.tools.values())
 
     async def call_tool(
-        self, name: str, arguments: dict[str, Any] | None = None
+        self,
+        name: str,
+        arguments: dict[str, Any] | None = None,
+        user: User | None = None,
     ) -> Any:
         """Call a registered tool directly (for tests)."""
         if name not in self.tools:
             raise KeyError(f"Tool '{name}' not found")
         tool = self.tools[name]
-        coerced = _coerce_tool_args(tool.handler, arguments or {})
+        coerced = _coerce_tool_args(tool.handler, arguments or {}, user=user)
         return await tool.handler(**coerced)
 
     async def _handle_jsonrpc_request(
-        self, req: dict[str, Any]
+        self, req: dict[str, Any], user: User | None = None
     ) -> dict[str, Any] | None:
         """Execute a single JSON-RPC 2.0 message."""
         jsonrpc = req.get("jsonrpc", "2.0")
@@ -443,8 +503,11 @@ class MCPServer:
         is_notification = req_id is None
 
         if method == "initialize":
+            req_version = params.get("protocolVersion", "2024-11-05")
+            supported_versions = ["2024-11-05", "2026-07-28"]
+            protocol_version = req_version if req_version in supported_versions else "2024-11-05"
             result = {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": protocol_version,
                 "capabilities": {
                     "tools": {
                         "listChanged": False,
@@ -519,7 +582,7 @@ class MCPServer:
 
             tool = self.tools[tool_name]
             try:
-                coerced_args = _coerce_tool_args(tool.handler, tool_args)
+                coerced_args = _coerce_tool_args(tool.handler, tool_args, user=user)
                 raw_result = await tool.handler(**coerced_args)
                 text_content = _serialize_result(raw_result)
 
@@ -537,6 +600,50 @@ class MCPServer:
                     result["structuredContent"] = structured
                 if tool.meta:
                     result["_meta"] = tool.meta
+            except AuthenticationRequired as exc:
+                result = {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"🔒 {exc.message}\n\n"
+                                "Для доступа к личным данным студента авторизуйтесь через OAuth в ChatGPT или перейдите в личный кабинет:\n"
+                                f"👉 {SERVER_BASE_URL}/account"
+                            ),
+                        }
+                    ],
+                    "isError": True,
+                }
+            except ServiceNotLinked as exc:
+                service_title = "ИИС БГУИР" if exc.service == "iis" else "СЭО Moodle"
+                link_url = f"{SERVER_BASE_URL}/account/link/{exc.service}"
+                result = {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"⚠️ Аккаунт {service_title} ещё не привязан к вашему профилю MyIIS.\n\n"
+                                f"Подключите его в личном кабинете: {link_url}"
+                            ),
+                        }
+                    ],
+                    "isError": True,
+                }
+            except ReconnectRequired as exc:
+                service_title = "ИИС БГУИР" if exc.service == "iis" else "СЭО Moodle"
+                link_url = f"{SERVER_BASE_URL}/account/link/{exc.service}"
+                result = {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                f"🔄 Сессия {service_title} истекла. Пожалуйста, выполните повторный вход:\n"
+                                f"👉 {link_url}"
+                            ),
+                        }
+                    ],
+                    "isError": True,
+                }
             except Exception as exc:
                 result = {
                     "content": [
@@ -632,6 +739,39 @@ class MCPServer:
                 )
 
             if request.method == "POST":
+                auth_header = request.headers.get("authorization")
+                current_user: User | None = None
+                if auth_header:
+                    try:
+                        current_user = oauth_server.authenticate_bearer(auth_header)
+                    except AuthenticationRequired as auth_err:
+                        duration_ms = round((time.perf_counter() - t0) * 1000, 2)
+                        _record_log({
+                            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                            "method": "POST",
+                            "path": streamable_http_path,
+                            "status": 401,
+                            "duration_ms": duration_ms,
+                            "client_ip": client_ip,
+                            "user_agent": user_agent,
+                            "error": f"Unauthorized: {auth_err.message}",
+                        })
+                        return JSONResponse(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": None,
+                                "error": {
+                                    "code": -32000,
+                                    "message": f"Unauthorized: {auth_err.message}",
+                                },
+                            },
+                            status_code=401,
+                            headers={
+                                **cors_headers,
+                                "WWW-Authenticate": 'Bearer error="invalid_token", error_description="The access token is invalid or expired"',
+                            },
+                        )
+
                 try:
                     payload = await request.json()
                 except Exception:
@@ -662,7 +802,7 @@ class MCPServer:
                 if isinstance(payload, list):
                     responses = []
                     for single_req in payload:
-                        resp = await self._handle_jsonrpc_request(single_req)
+                        resp = await self._handle_jsonrpc_request(single_req, user=current_user)
                         if resp is not None:
                             responses.append(resp)
                     duration_ms = round((time.perf_counter() - t0) * 1000, 2)
@@ -681,7 +821,7 @@ class MCPServer:
                         return Response(status_code=202, headers=cors_headers)
                     resp_data = responses
                 elif isinstance(payload, dict):
-                    resp = await self._handle_jsonrpc_request(payload)
+                    resp = await self._handle_jsonrpc_request(payload, user=current_user)
                     duration_ms = round((time.perf_counter() - t0) * 1000, 2)
                     log_item = {
                         "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
@@ -698,7 +838,7 @@ class MCPServer:
                     if isinstance(params, dict):
                         if "name" in params:
                             log_item["tool"] = params["name"]
-                            log_item["tool_args"] = params.get("arguments")
+                            log_item["tool_args"] = redact_dict(params.get("arguments"))
                         if "uri" in params:
                             log_item["resource_uri"] = params["uri"]
                     _record_log(log_item)
@@ -749,7 +889,9 @@ class MCPServer:
 # Argument coercion helper (replaces pydantic model validation)
 # ---------------------------------------------------------------------------
 
-def _coerce_tool_args(func: Callable, arguments: dict[str, Any]) -> dict[str, Any]:
+def _coerce_tool_args(
+    func: Callable, arguments: dict[str, Any], user: User | None = None
+) -> dict[str, Any]:
     """Coerce tool call arguments to match function signature types."""
     sig = inspect.signature(func)
     try:
@@ -759,6 +901,10 @@ def _coerce_tool_args(func: Callable, arguments: dict[str, Any]) -> dict[str, An
 
     result: dict[str, Any] = {}
     for param_name, param in sig.parameters.items():
+        if param_name == "user":
+            result["user"] = user
+            continue
+
         annotation = hints.get(param_name)
 
         if param_name in arguments:
@@ -1285,17 +1431,152 @@ async def root_info(request: Request) -> JSONResponse:
         {
             "name": "MyIIS MCP Server",
             "version": "0.1.0",
-            "description": "Model Context Protocol server connecting ChatGPT to BSUIR IIS API",
+            "description": "Model Context Protocol server connecting ChatGPT to BSUIR IIS and LMS",
             "repository": "https://github.com/OrDinaD/myiis-mcp",
             "endpoints": {
                 "mcp": "/mcp",
                 "health": "/health",
                 "widget": "/widget",
                 "logs": "/logs",
+                "account": "/account",
+                "oauth_authorize": "/oauth/authorize",
+                "oauth_token": "/oauth/token",
+                "oauth_metadata": "/.well-known/oauth-authorization-server",
             },
             "status": "running",
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Storage, Session Manager & OAuth 2.1 Server Setup
+# ---------------------------------------------------------------------------
+
+DB_PATH = os.environ.get("MYIIS_DB_PATH", "myiis_mcp.db")
+try:
+    storage = StorageRepository(db_path=DB_PATH)
+except Exception:
+    storage = StorageRepository(db_path=":memory:")
+
+session_manager = UpstreamSessionManager(storage=storage)
+oauth_server = OAuthServer(storage=storage)
+account_routes = AccountRoutes(session_manager=session_manager, storage=storage)
+
+# Register Account Status tool
+mcp.register_tool(
+    create_account_tool(session_manager),
+    name="get_account_status",
+    title="Get Account Link Status",
+    description=(
+        "Получить статус подключения персональных аккаунтов ИИС БГУИР и СЭО Moodle. "
+        "Показывает, связаны ли аккаунты, статус сессии и имя пользователя. Никаких паролей и секретов."
+    ),
+    annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False),
+)
+
+# Register protected IIS tools
+iis_tools = create_iis_tools(session_manager)
+for tool_name, tool_func in iis_tools.items():
+    mcp.register_tool(
+        tool_func,
+        name=tool_name,
+        annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False),
+    )
+
+# Register protected LMS Moodle tools
+lms_tools = create_lms_tools(session_manager)
+for tool_name, tool_func in lms_tools.items():
+    mcp.register_tool(
+        tool_func,
+        name=tool_name,
+        annotations=ToolAnnotations(read_only_hint=True, destructive_hint=False, open_world_hint=False),
+    )
+
+
+# ---------------------------------------------------------------------------
+# OAuth 2.1 RFC 8414 & Endpoints
+# ---------------------------------------------------------------------------
+
+OAUTH_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+}
+
+
+@mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET", "OPTIONS"])
+async def oauth_protected_resource(request: Request) -> Response:
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=OAUTH_CORS_HEADERS)
+    return JSONResponse(oauth_server.get_protected_resource_metadata(), headers=OAUTH_CORS_HEADERS)
+
+
+@mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET", "OPTIONS"])
+async def oauth_authorization_server(request: Request) -> Response:
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=OAUTH_CORS_HEADERS)
+    return JSONResponse(oauth_server.get_authorization_server_metadata(), headers=OAUTH_CORS_HEADERS)
+
+
+@mcp.custom_route("/.well-known/openid-configuration", methods=["GET", "OPTIONS"])
+async def openid_configuration(request: Request) -> Response:
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=OAUTH_CORS_HEADERS)
+    return JSONResponse(oauth_server.get_authorization_server_metadata(), headers=OAUTH_CORS_HEADERS)
+
+
+@mcp.custom_route("/oauth/authorize", methods=["GET", "POST"])
+async def oauth_authorize(request: Request) -> Response:
+    return await oauth_server.handle_authorize(request)
+
+
+@mcp.custom_route("/oauth/token", methods=["POST", "OPTIONS"])
+async def oauth_token(request: Request) -> Response:
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=OAUTH_CORS_HEADERS)
+    resp = await oauth_server.handle_token(request)
+    for k, v in OAUTH_CORS_HEADERS.items():
+        resp.headers[k] = v
+    return resp
+
+
+@mcp.custom_route("/oauth/revoke", methods=["POST", "OPTIONS"])
+async def oauth_revoke(request: Request) -> Response:
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=OAUTH_CORS_HEADERS)
+    resp = await oauth_server.handle_revoke(request)
+    for k, v in OAUTH_CORS_HEADERS.items():
+        resp.headers[k] = v
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# Account Linking Web Dashboard Endpoints
+# ---------------------------------------------------------------------------
+
+@mcp.custom_route("/account", methods=["GET"])
+async def account_dashboard(request: Request) -> Response:
+    return await account_routes.handle_dashboard(request)
+
+
+@mcp.custom_route("/account/link/iis", methods=["GET", "POST"])
+async def account_link_iis(request: Request) -> Response:
+    return await account_routes.handle_link_iis(request)
+
+
+@mcp.custom_route("/account/link/lms", methods=["GET", "POST"])
+async def account_link_lms(request: Request) -> Response:
+    return await account_routes.handle_link_lms(request)
+
+
+@mcp.custom_route("/account/unlink/iis", methods=["POST"])
+async def account_unlink_iis(request: Request) -> Response:
+    return await account_routes.handle_unlink_iis(request)
+
+
+@mcp.custom_route("/account/unlink/lms", methods=["POST"])
+async def account_unlink_lms(request: Request) -> Response:
+    return await account_routes.handle_unlink_lms(request)
 
 
 # Build the Starlette app
